@@ -6,6 +6,12 @@ Quick Document can build an unsigned DMG for local testing with:
 npm run dist:mac
 ```
 
+Unsigned builds downloaded from GitHub Releases may be blocked by macOS Gatekeeper with a message like `"Quick Document" is damaged and can't be opened`. For local testing, first drag the app from the DMG into `/Applications`, then remove the quarantine attribute:
+
+```bash
+sudo find "/Applications/Quick Document.app" -exec xattr -d com.apple.quarantine {} \; 2>/dev/null
+```
+
 For public distribution without Gatekeeper warnings, the Mac build needs an active Apple Developer Program certificate:
 
 - Required: `Developer ID Application`
