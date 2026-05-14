@@ -40,7 +40,6 @@ jobs:
             release/*.dmg
             release/*-mac.zip
             release/*.blockmap
-            release/*.yml
           if-no-files-found: error
 
   build-windows:
@@ -71,7 +70,6 @@ jobs:
           path: |
             release/*.exe
             release/*.blockmap
-            release/*.yml
           if-no-files-found: error
 
   publish-release:
@@ -99,7 +97,7 @@ jobs:
           for asset in release-assets/**/*; do
             [[ -f "$asset" ]] || continue
             case "$asset" in
-              *.dmg|*.zip|*.exe|*.blockmap|*.yml) files+=("$asset") ;;
+              *.dmg|*.zip|*.exe|*.blockmap) files+=("$asset") ;;
             esac
           done
 
@@ -109,6 +107,7 @@ jobs:
           fi
 
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete-asset "$GITHUB_REF_NAME" builder-debug.yml --repo "$GITHUB_REPOSITORY" --yes >/dev/null 2>&1 || true
             gh release upload "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
