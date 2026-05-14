@@ -12,7 +12,9 @@
     "preview": "electron-vite preview",
     "dist": "npm run build && electron-builder",
     "dist:mac": "npm run build && electron-builder --mac",
-    "dist:win": "npm run build && electron-builder --win"
+    "dist:mac:ci": "npm run build && electron-builder --mac --publish never",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:win:ci": "npm run build && electron-builder --win --publish never"
   },
   "dependencies": {
     "docx": "^9.5.1",

@@ -28,7 +28,7 @@ jobs:
         run: npm ci
 
       - name: Build DMG
-        run: npm run dist:mac
+        run: npm run dist:mac:ci
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
@@ -60,7 +60,7 @@ jobs:
         run: npm ci
 
       - name: Build EXE
-        run: npm run dist:win
+        run: npm run dist:win:ci
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
