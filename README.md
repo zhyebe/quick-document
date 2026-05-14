@@ -2,6 +2,8 @@
 
 Quick Document 是一个 macOS / Windows 兼容的 AI 文档处理助手。核心模式是：选择本地文档目录，输入一句修改要求，AI 根据文件路径调用内置 Office Skills 处理 Word、Excel、PPT。
 
+AI快速处理文档软件，高效自带SKILL。
+
 ## 当前能力
 
 - 桌面驻留：关闭窗口后可隐藏到托盘继续运行。
