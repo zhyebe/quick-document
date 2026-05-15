@@ -260,15 +260,16 @@ export function App(): JSX.Element {
         await refreshWorkspaceSnapshot(settingsRef.current.workspacePath)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      const message = formatRuntimeError(err)
+      setError(message)
       const failedMessage = appendProcessEvent(
         {
           ...assistantDraft,
-          content: `处理没有完成：${err instanceof Error ? err.message : String(err)}`
+          content: `处理没有完成：${message}`
         },
         {
           type: 'error',
-          message: `处理没有完成：${err instanceof Error ? err.message : String(err)}`
+          message: `处理没有完成：${message}`
         }
       )
       setMessages((current) => current.map((message) => (message.id === assistantDraft.id ? failedMessage : message)))
@@ -642,6 +643,23 @@ function isSimilarProcessMessage(previous: string, next: string): boolean {
   if (previous === next) return true
   const normalize = (value: string): string => value.replace(/（\d+s）/g, '').replace(/\d+/g, '#')
   return normalize(previous) === normalize(next)
+}
+
+function formatRuntimeError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  const message = raw
+    .replace(/Error invoking remote method ['"][^'"]+['"]:\s*/g, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 500)
+
+  if (/\b504\b|gateway|timeout|timed out/i.test(message)) {
+    return 'AI 接口或代理暂时超时，当前没有修改任何文档。请稍后重试，或切换到可用的 cc-switch / OpenAI 代理配置。'
+  }
+  return message || '未知错误'
 }
 
 function MessageBubble({ message }: { message: ChatMessage }): JSX.Element {

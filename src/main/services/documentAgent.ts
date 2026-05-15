@@ -20,6 +20,7 @@ interface AgentSettings {
   model: string
   apiKey: string
   requestMaxRetries?: number
+  requestTimeoutMs?: number
 }
 
 export interface DocumentAgentInput {
@@ -53,6 +54,8 @@ interface AgentToolResult {
 }
 
 const MAX_AGENT_TURNS = 10
+const DEFAULT_AI_MAX_RETRIES = 5
+const DEFAULT_AI_REQUEST_TIMEOUT_MS = 120_000
 
 const DOCUMENT_AGENT_PROMPT = `
 You are Quick Document's AI document agent. Behave like a focused Codex-style agent for local Word, Excel, and PowerPoint work.
@@ -83,22 +86,22 @@ export async function runDocumentAgent(input: DocumentAgentInput): Promise<Docum
   }
 
   try {
-    if (input.settings.provider === 'anthropic') return runAnthropicAgent(input)
+    if (input.settings.provider === 'anthropic') return await runAnthropicAgent(input)
     if (input.settings.wireApi === 'responses') {
       try {
         return await runOpenAiResponsesAgent(input)
       } catch (error) {
         if (!shouldFallbackToChatCompletions(error)) throw error
         input.onProgress?.('Responses 工具调用不可用，正在切换到 OpenAI 兼容聊天工具调用...')
-        return runOpenAiChatAgent(input)
+        return await runOpenAiChatAgent(input)
       }
     }
-    return runOpenAiChatAgent(input)
+    return await runOpenAiChatAgent(input)
   } catch (error) {
+    const reply = formatAgentFailureMessage(error)
+    input.onProgress?.(reply)
     return {
-      reply: `AI 调用没有成功，所以没有修改任何文档。原因：${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      reply,
       actionResults: []
     }
   }
@@ -147,25 +150,29 @@ async function callOpenAiChatTurn(
   input: DocumentAgentInput,
   messages: Array<Record<string, unknown>>
 ): Promise<Record<string, unknown>> {
-  return withRetries(input.settings.requestMaxRetries ?? 3, async () => {
-    const response = await fetch(`${input.settings.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${input.settings.apiKey}`,
-        'Content-Type': 'application/json'
+  return withRetries(input, async () => {
+    const response = await fetchWithTimeout(
+      `${input.settings.baseUrl.replace(/\/$/, '')}/chat/completions`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${input.settings.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: input.settings.model,
+          temperature: 0.2,
+          messages,
+          tools: openAiTools(),
+          tool_choice: 'auto',
+          parallel_tool_calls: false
+        })
       },
-      body: JSON.stringify({
-        model: input.settings.model,
-        temperature: 0.2,
-        messages,
-        tools: openAiTools(),
-        tool_choice: 'auto',
-        parallel_tool_calls: false
-      })
-    })
+      input.settings.requestTimeoutMs
+    )
     if (!response.ok) {
       const text = await response.text()
-      throw new Error(`OpenAI-compatible request failed: ${response.status} ${sanitizeRemoteError(text)}`)
+      throw createRemoteRequestError('OpenAI-compatible request', response.status, text)
     }
     const data = (await response.json()) as { choices?: Array<{ message?: Record<string, unknown> }> }
     return data.choices?.[0]?.message || {}
@@ -212,7 +219,7 @@ async function callOpenAiResponsesTurn(
   nextInput: unknown,
   previousResponseId: string
 ): Promise<Record<string, unknown>> {
-  return withRetries(input.settings.requestMaxRetries ?? 3, async () => {
+  return withRetries(input, async () => {
     const body: Record<string, unknown> = {
       model: input.settings.model,
       temperature: 0.2,
@@ -225,17 +232,21 @@ async function callOpenAiResponsesTurn(
     }
     if (previousResponseId) body.previous_response_id = previousResponseId
 
-    const response = await fetch(`${input.settings.baseUrl.replace(/\/$/, '')}/responses`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${input.settings.apiKey}`,
-        'Content-Type': 'application/json'
+    const response = await fetchWithTimeout(
+      `${input.settings.baseUrl.replace(/\/$/, '')}/responses`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${input.settings.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
       },
-      body: JSON.stringify(body)
-    })
+      input.settings.requestTimeoutMs
+    )
     if (!response.ok) {
       const text = await response.text()
-      throw new Error(`OpenAI Responses request failed: ${response.status} ${sanitizeRemoteError(text)}`)
+      throw createRemoteRequestError('OpenAI Responses request', response.status, text)
     }
     return (await response.json()) as Record<string, unknown>
   })
@@ -296,27 +307,33 @@ async function callAnthropicTurn(
   input: DocumentAgentInput,
   messages: Array<Record<string, unknown>>
 ): Promise<Record<string, unknown>> {
-  const response = await fetch(buildAnthropicUrl(input.settings.baseUrl), {
-    method: 'POST',
-    headers: {
-      'x-api-key': input.settings.apiKey,
-      'anthropic-version': '2023-06-01',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: input.settings.model,
-      max_tokens: 4096,
-      temperature: 0.2,
-      system: buildSystemText(input),
-      tools: anthropicTools(),
-      messages
-    })
+  return withRetries(input, async () => {
+    const response = await fetchWithTimeout(
+      buildAnthropicUrl(input.settings.baseUrl),
+      {
+        method: 'POST',
+        headers: {
+          'x-api-key': input.settings.apiKey,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: input.settings.model,
+          max_tokens: 4096,
+          temperature: 0.2,
+          system: buildSystemText(input),
+          tools: anthropicTools(),
+          messages
+        })
+      },
+      input.settings.requestTimeoutMs
+    )
+    if (!response.ok) {
+      const text = await response.text()
+      throw createRemoteRequestError('Anthropic-compatible request', response.status, text)
+    }
+    return (await response.json()) as Record<string, unknown>
   })
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(`Anthropic-compatible request failed: ${response.status} ${sanitizeRemoteError(text)}`)
-  }
-  return (await response.json()) as Record<string, unknown>
 }
 
 async function executeAgentTool(
@@ -793,21 +810,56 @@ function shouldFallbackToChatCompletions(error: unknown): boolean {
   return /Responses request failed|\/responses|tools?|function_call|unsupported|not found|Cannot POST|404|405|400/i.test(error.message)
 }
 
-function sanitizeRemoteError(text: string): string {
-  const compact = text.trim().replace(/\s+/g, ' ').slice(0, 300)
-  return /<[a-z!/]/i.test(compact) ? `${compact.slice(0, 120)}...` : compact
+function createRemoteRequestError(label: string, status: number, text: string): Error {
+  const error = new Error(`${label} failed: ${status} ${sanitizeRemoteError(text)}`)
+  error.name = `RemoteRequest${status}`
+  return error
 }
 
-async function withRetries<T>(attempts: number, fn: () => Promise<T>): Promise<T> {
+function sanitizeRemoteError(text: string): string {
+  const compact = text
+    .trim()
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .slice(0, 500)
+  return compact || 'empty response'
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = DEFAULT_AI_REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), Math.max(10_000, timeoutMs))
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function withRetries<T>(input: DocumentAgentInput, fn: () => Promise<T>): Promise<T> {
   let lastError: unknown
-  const total = Math.max(1, attempts)
+  const total = Math.max(1, input.settings.requestMaxRetries ?? DEFAULT_AI_MAX_RETRIES)
   for (let index = 0; index < total; index += 1) {
     try {
       return await fn()
     } catch (error) {
       lastError = error
       if (!isRetryableError(error) || index === total - 1) break
-      await new Promise((resolve) => setTimeout(resolve, 300 * (index + 1)))
+      const delay = retryDelayMs(index)
+      input.onProgress?.(`AI 接口暂时不可用，正在第 ${index + 2}/${total} 次重试...`)
+      await new Promise((resolve) => setTimeout(resolve, delay))
     }
   }
   throw lastError instanceof Error ? lastError : new Error('Agent request failed.')
@@ -815,7 +867,27 @@ async function withRetries<T>(attempts: number, fn: () => Promise<T>): Promise<T
 
 function isRetryableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
-  return /(?:\b50[02479]\b|\bnetwork\b|\btimeout\b|\bfetch failed\b)/i.test(error.message)
+  return /(?:\b429\b|\b50[02479]\b|\bnetwork\b|\btimeout\b|\babort\b|\bfetch failed\b|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)/i.test(
+    error.message
+  )
+}
+
+function retryDelayMs(index: number): number {
+  return Math.min(12_000, 800 * 2 ** index)
+}
+
+function formatAgentFailureMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/\b504\b|gateway|timeout|timed out|abort/i.test(message)) {
+    return 'AI 接口或代理暂时超时，当前没有执行任何文档修改。你可以稍后重试，或者切换到可用的 cc-switch / OpenAI 代理配置。'
+  }
+  if (/\b401\b|unauthorized|api key|authentication/i.test(message)) {
+    return 'AI Key 不可用或认证失败，当前没有执行任何文档修改。请检查 cc-switch / API Key 配置。'
+  }
+  if (/\b429\b|rate limit|quota/i.test(message)) {
+    return 'AI 接口限流或额度不足，当前没有执行任何文档修改。请稍后重试或切换模型。'
+  }
+  return `AI 调用没有成功，所以没有修改任何文档。原因：${sanitizeRemoteError(message)}`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

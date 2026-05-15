@@ -243,71 +243,89 @@ function registerIpc(): void {
       event.sender.send('chat:stream', { requestId, ...payload })
     }
 
-    const publicSettings = settingsStore.getPublicSettings()
-    emit({ type: 'status', message: '正在读取当前文档目录...' })
-    const workspaceSnapshot = scanWorkspace(publicSettings.workspacePath)
-    const latestPrompt = request.messages[request.messages.length - 1]?.content || ''
-    emit({
-      type: 'status',
-      message: `已读取目录，发现 ${workspaceSnapshot.files.length} 个 Office 文件。正在读取相关文档预览...`
-    })
-    const documentPreviewContext = await buildDocumentPreviewContext(
-      latestPrompt,
-      request.targetFiles || [],
-      workspaceSnapshot
-    )
-    const doclingPreviewContext = await buildDoclingPreviewContext(
-      request.targetFiles.length > 0 ? request.targetFiles : workspaceSnapshot.files
-    )
-    emit({ type: 'status', message: '正在把目录、文档预览和 Office SKILL 发送给 AI...' })
-    const heartbeat = startChatHeartbeat(emit)
-    const agentInput = {
-      messages: request.messages,
-      targetFiles: request.targetFiles || [],
-      workspaceSnapshot,
-      documentPreviewContext: [documentPreviewContext, doclingPreviewContext ? `Docling 解析结果：\n${doclingPreviewContext}` : '']
-        .filter(Boolean)
-        .join('\n\n---\n\n'),
-      skillBrief: [
-        getEmbeddedOfficeSkillBrief(),
-        getRelevantOfficeSkillContext(latestPrompt, request.targetFiles || [], workspaceSnapshot)
-      ]
-        .filter(Boolean)
-        .join('\n\n---\n\n'),
-      settings: {
-        provider: publicSettings.provider,
-        wireApi: publicSettings.wireApi,
-        baseUrl: publicSettings.baseUrl,
-        model: publicSettings.model,
-        apiKey: settingsStore.getApiKey()
-      },
-      onProgress: (message: string) => emit({ type: 'status', message })
-      }
-    const agentResult = await runDocumentAgent(agentInput)
-      .finally(heartbeat)
-
-    const results = agentResult.actionResults
-    for (const result of results) {
-      if (result.file && result.file.kind !== 'unknown') settingsStore.addRecentFile(result.file)
+    try {
+      const publicSettings = settingsStore.getPublicSettings()
+      emit({ type: 'status', message: '正在读取当前文档目录...' })
+      const workspaceSnapshot = scanWorkspace(publicSettings.workspacePath)
+      const latestPrompt = request.messages[request.messages.length - 1]?.content || ''
       emit({
-        type: result.ok ? 'step-done' : 'error',
-        message: result.ok ? result.summary : `${result.summary}${result.error ? `：${result.error}` : ''}`
+        type: 'status',
+        message: `已读取目录，发现 ${workspaceSnapshot.files.length} 个 Office 文件。正在读取相关文档预览...`
       })
-    }
-    const generatedFiles = results.flatMap((result) => (result.file ? [result.file] : []))
-    const assistantMessage = {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      role: 'assistant' as const,
-      content: buildAssistantReply(agentResult.reply, results),
-      createdAt: new Date().toISOString(),
-      actions: results
-    }
-    settingsStore.saveChatHistory([...request.messages, assistantMessage])
-    emit({ type: 'done', message: generatedFiles.length > 0 ? '处理完成，已刷新文档目录和产物列表。' : '处理完成。' })
+      const documentPreviewContext = await buildDocumentPreviewContext(
+        latestPrompt,
+        request.targetFiles || [],
+        workspaceSnapshot
+      )
+      const doclingPreviewContext = await buildDoclingPreviewContext(
+        request.targetFiles.length > 0 ? request.targetFiles : workspaceSnapshot.files
+      )
+      emit({ type: 'status', message: '正在把目录、文档预览和 Office SKILL 发送给 AI...' })
+      const heartbeat = startChatHeartbeat(emit)
+      const agentInput = {
+        messages: request.messages,
+        targetFiles: request.targetFiles || [],
+        workspaceSnapshot,
+        documentPreviewContext: [documentPreviewContext, doclingPreviewContext ? `Docling 解析结果：\n${doclingPreviewContext}` : '']
+          .filter(Boolean)
+          .join('\n\n---\n\n'),
+        skillBrief: [
+          getEmbeddedOfficeSkillBrief(),
+          getRelevantOfficeSkillContext(latestPrompt, request.targetFiles || [], workspaceSnapshot)
+        ]
+          .filter(Boolean)
+          .join('\n\n---\n\n'),
+        settings: {
+          provider: publicSettings.provider,
+          wireApi: publicSettings.wireApi,
+          baseUrl: publicSettings.baseUrl,
+          model: publicSettings.model,
+          apiKey: settingsStore.getApiKey()
+        },
+        onProgress: (message: string) => emit({ type: 'status', message })
+      }
+      const agentResult = await runDocumentAgent(agentInput)
+        .finally(heartbeat)
 
-    return {
-      message: assistantMessage,
-      generatedFiles
+      const results = agentResult.actionResults
+      for (const result of results) {
+        if (result.file && result.file.kind !== 'unknown') settingsStore.addRecentFile(result.file)
+        emit({
+          type: result.ok ? 'step-done' : 'error',
+          message: result.ok ? result.summary : `${result.summary}${result.error ? `：${result.error}` : ''}`
+        })
+      }
+      const generatedFiles = results.flatMap((result) => (result.file ? [result.file] : []))
+      const assistantMessage = {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        role: 'assistant' as const,
+        content: buildAssistantReply(agentResult.reply, results),
+        createdAt: new Date().toISOString(),
+        actions: results
+      }
+      settingsStore.saveChatHistory([...request.messages, assistantMessage])
+      emit({ type: 'done', message: generatedFiles.length > 0 ? '处理完成，已刷新文档目录和产物列表。' : '处理完成。' })
+
+      return {
+        message: assistantMessage,
+        generatedFiles
+      }
+    } catch (error) {
+      const message = chatFailureMessage(error)
+      emit({ type: 'error', message })
+      emit({ type: 'done', message: '处理结束，未修改文档。' })
+      const assistantMessage = {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        role: 'assistant' as const,
+        content: message,
+        createdAt: new Date().toISOString(),
+        actions: []
+      }
+      settingsStore.saveChatHistory([...request.messages, assistantMessage])
+      return {
+        message: assistantMessage,
+        generatedFiles: []
+      }
     }
   })
 }
@@ -319,6 +337,26 @@ function buildAssistantReply(reply: string, results: Array<{ ok: boolean; summar
     return `- ${result.summary}: ${result.error || 'unknown error'}`
   })
   return `${reply}\n\n处理结果：\n${lines.join('\n')}`
+}
+
+function chatFailureMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  const message = raw
+    .replace(/Error invoking remote method ['"][^'"]+['"]:\s*/g, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 500)
+
+  if (/\b504\b|gateway|timeout|timed out/i.test(message)) {
+    return 'AI 接口或代理暂时超时，当前没有修改任何文档。请稍后重试，或切换到可用的 cc-switch / OpenAI 代理配置。'
+  }
+  if (/\b401\b|unauthorized|api key|authentication/i.test(message)) {
+    return 'AI Key 不可用或认证失败，当前没有修改任何文档。请检查 cc-switch / API Key 配置。'
+  }
+  return `处理没有完成，当前没有修改任何文档。原因：${message || '未知错误'}`
 }
 
 function startChatHeartbeat(emit: (payload: Omit<ChatStreamEvent, 'requestId'>) => void): () => void {
