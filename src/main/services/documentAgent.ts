@@ -54,9 +54,9 @@ interface AgentToolResult {
   error?: string
 }
 
-const MAX_AGENT_TURNS = 10
-const DEFAULT_AI_MAX_RETRIES = 5
+const DEFAULT_AGENT_TURN_LIMIT = Number.POSITIVE_INFINITY
 const DEFAULT_AI_REQUEST_TIMEOUT_MS = 120_000
+const UNLIMITED_RETRY_LABEL = '持续'
 
 const DOCUMENT_AGENT_PROMPT = `
 You are Quick Document's AI document agent. Behave like a focused Codex-style agent for local Word, Excel, and PowerPoint work.
@@ -112,8 +112,9 @@ export async function runDocumentAgent(input: DocumentAgentInput): Promise<Docum
 async function runOpenAiChatAgent(input: DocumentAgentInput): Promise<DocumentAgentOutput> {
   const actionResults: ActionResult[] = []
   const messages: Array<Record<string, unknown>> = buildOpenAiChatMessages(input)
+  const maxTurns = agentTurnLimit()
 
-  for (let turn = 0; turn < MAX_AGENT_TURNS; turn += 1) {
+  for (let turn = 0; turn < maxTurns; turn += 1) {
     ensureNotCancelled(input.signal)
     input.onProgress?.(turn === 0 ? 'AI 正在结合文档 SKILL 理解请求...' : 'AI 正在根据工具结果继续处理...')
     const assistantMessage = await callOpenAiChatTurn(input, messages)
@@ -121,6 +122,18 @@ async function runOpenAiChatAgent(input: DocumentAgentInput): Promise<DocumentAg
     const content = stringValue(assistantMessage.content)
 
     if (toolCalls.length === 0) {
+      if (shouldAskAiToRepairAfterToolFailure(actionResults)) {
+        input.onProgress?.('文档工具上一步失败，AI 没有继续调用工具，正在要求它换方法重试...')
+        messages.push({
+          role: 'assistant',
+          content: content || ''
+        })
+        messages.push({
+          role: 'user',
+          content: buildToolFailureRepairPrompt(actionResults)
+        })
+        continue
+      }
       return {
         reply: content || buildDefaultReply(actionResults),
         actionResults: visibleActionResults(actionResults)
@@ -145,7 +158,7 @@ async function runOpenAiChatAgent(input: DocumentAgentInput): Promise<DocumentAg
   }
 
   return {
-    reply: `AI 已达到本轮最大工具调用次数。${buildDefaultReply(actionResults)}`,
+    reply: buildTurnLimitReply(maxTurns, actionResults),
     actionResults: visibleActionResults(actionResults)
   }
 }
@@ -188,14 +201,20 @@ async function runOpenAiResponsesAgent(input: DocumentAgentInput): Promise<Docum
   const actionResults: ActionResult[] = []
   let previousResponseId = ''
   let nextInput: unknown = buildOpenAiResponsesInput(input)
+  const maxTurns = agentTurnLimit()
 
-  for (let turn = 0; turn < MAX_AGENT_TURNS; turn += 1) {
+  for (let turn = 0; turn < maxTurns; turn += 1) {
     ensureNotCancelled(input.signal)
     input.onProgress?.(turn === 0 ? 'AI 正在结合文档 SKILL 理解请求...' : 'AI 正在根据工具结果继续处理...')
     const responseData = await callOpenAiResponsesTurn(input, nextInput, previousResponseId)
     previousResponseId = stringValue(responseData.id) || previousResponseId
     const toolCalls = extractOpenAiResponsesToolCalls(responseData)
     if (toolCalls.length === 0) {
+      if (shouldAskAiToRepairAfterToolFailure(actionResults)) {
+        input.onProgress?.('文档工具上一步失败，AI 没有继续调用工具，正在要求它换方法重试...')
+        nextInput = buildOpenAiResponsesRepairInput(actionResults)
+        continue
+      }
       return {
         reply: extractResponseOutputText(responseData) || buildDefaultReply(actionResults),
         actionResults: visibleActionResults(actionResults)
@@ -216,7 +235,7 @@ async function runOpenAiResponsesAgent(input: DocumentAgentInput): Promise<Docum
   }
 
   return {
-    reply: `AI 已达到本轮最大工具调用次数。${buildDefaultReply(actionResults)}`,
+    reply: buildTurnLimitReply(maxTurns, actionResults),
     actionResults: visibleActionResults(actionResults)
   }
 }
@@ -263,8 +282,9 @@ async function callOpenAiResponsesTurn(
 async function runAnthropicAgent(input: DocumentAgentInput): Promise<DocumentAgentOutput> {
   const actionResults: ActionResult[] = []
   const messages: Array<Record<string, unknown>> = buildAnthropicMessages(input)
+  const maxTurns = agentTurnLimit()
 
-  for (let turn = 0; turn < MAX_AGENT_TURNS; turn += 1) {
+  for (let turn = 0; turn < maxTurns; turn += 1) {
     ensureNotCancelled(input.signal)
     input.onProgress?.(turn === 0 ? 'AI 正在结合文档 SKILL 理解请求...' : 'AI 正在根据工具结果继续处理...')
     const responseData = await callAnthropicTurn(input, messages)
@@ -279,6 +299,12 @@ async function runAnthropicAgent(input: DocumentAgentInput): Promise<DocumentAge
       .filter((toolCall) => toolCall.name)
 
     if (toolCalls.length === 0) {
+      if (shouldAskAiToRepairAfterToolFailure(actionResults)) {
+        input.onProgress?.('文档工具上一步失败，AI 没有继续调用工具，正在要求它换方法重试...')
+        messages.push({ role: 'assistant', content })
+        messages.push({ role: 'user', content: buildToolFailureRepairPrompt(actionResults) })
+        continue
+      }
       return {
         reply: content
           .filter((item): item is Record<string, unknown> => isRecord(item) && item.type === 'text')
@@ -308,7 +334,7 @@ async function runAnthropicAgent(input: DocumentAgentInput): Promise<DocumentAge
   }
 
   return {
-    reply: `AI 已达到本轮最大工具调用次数。${buildDefaultReply(actionResults)}`,
+    reply: buildTurnLimitReply(maxTurns, actionResults),
     actionResults: visibleActionResults(actionResults)
   }
 }
@@ -480,6 +506,20 @@ function buildOpenAiResponsesInput(input: DocumentAgentInput): Array<Record<stri
       ...(message.attachments || []).flatMap((attachment) => openAiResponsesAttachmentParts(attachment))
     ]
   }))
+}
+
+function buildOpenAiResponsesRepairInput(actionResults: ActionResult[]): Array<Record<string, unknown>> {
+  return [
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: buildToolFailureRepairPrompt(actionResults)
+        }
+      ]
+    }
+  ]
 }
 
 function buildAnthropicMessages(input: DocumentAgentInput): Array<Record<string, unknown>> {
@@ -747,10 +787,43 @@ function visibleActionResults(results: ActionResult[]): ActionResult[] {
   return successes.length > 0 ? successes : results.slice(-3)
 }
 
+function shouldAskAiToRepairAfterToolFailure(results: ActionResult[]): boolean {
+  const last = results[results.length - 1]
+  return Boolean(last && !last.ok)
+}
+
+function buildToolFailureRepairPrompt(results: ActionResult[]): string {
+  const recentFailures = results
+    .filter((result) => !result.ok)
+    .slice(-3)
+    .map((result, index) => {
+      const error = result.error ? `\n错误：${result.error}` : ''
+      return `${index + 1}. ${result.summary}${error}`
+    })
+    .join('\n\n')
+
+  return `上一轮文档工具执行失败，但用户任务还没有完成。请像 Codex 一样继续处理，不要只解释原因，也不要输出工作流。
+
+请基于下面的失败信息换一种可执行方法继续调用工具：
+${recentFailures || '工具返回失败，但没有提供详细错误。'}
+
+要求：
+- 如果是路径、文件名或月份判断错误，先调用 list_workspace_files 读取当前目录真实文件。
+- 如果要复制文件，先用 quickDocument.fs.copyFileSync 复制真实文件，再只在新文件上继续修改。
+- 如果要修改 Word/Excel/PPT，继续调用 run_document_script 直接读写目标文件。
+- 在脚本里优先使用 quickDocument.fs/path/ExcelJS/docx/pptxgen/JSZip，不要依赖用户手动处理。
+- 完成后必须调用 quickDocument.writeResult({ filePath }) 报告实际改好的文件。`
+}
+
 function buildDefaultReply(results: ActionResult[]): string {
   const successes = results.filter((result) => result.ok)
   if (successes.length === 0) return '我没有完成任何文档修改。'
   return successes.map((result) => result.summary).join('\n')
+}
+
+function buildTurnLimitReply(maxTurns: number, results: ActionResult[]): string {
+  const limit = Number.isFinite(maxTurns) ? `${maxTurns}` : UNLIMITED_RETRY_LABEL
+  return `AI 已达到本轮最大工具调用次数（${limit}）。${buildDefaultReply(results)}`
 }
 
 function parseToolArguments(value: string): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
@@ -870,7 +943,7 @@ async function fetchWithTimeout(
 
 async function withRetries<T>(input: DocumentAgentInput, fn: () => Promise<T>): Promise<T> {
   let lastError: unknown
-  const total = Math.max(1, input.settings.requestMaxRetries ?? DEFAULT_AI_MAX_RETRIES)
+  const total = retryLimit(input.settings.requestMaxRetries)
   for (let index = 0; index < total; index += 1) {
     try {
       ensureNotCancelled(input.signal)
@@ -880,22 +953,53 @@ async function withRetries<T>(input: DocumentAgentInput, fn: () => Promise<T>): 
       ensureNotCancelled(input.signal)
       if (!isRetryableError(error) || index === total - 1) break
       const delay = retryDelayMs(index)
-      input.onProgress?.(`AI 接口暂时不可用，正在第 ${index + 2}/${total} 次重试...`)
+      input.onProgress?.(retryProgressMessage(error, index + 2, total, delay))
       await waitForRetry(delay, input.signal)
     }
   }
   throw lastError instanceof Error ? lastError : new Error('Agent request failed.')
 }
 
+function agentTurnLimit(): number {
+  const configured = Number(process.env.QUICK_DOCUMENT_AGENT_MAX_TURNS || '')
+  if (Number.isFinite(configured) && configured > 0) return Math.floor(configured)
+  return DEFAULT_AGENT_TURN_LIMIT
+}
+
+function retryLimit(value: number | undefined): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value)
+  return Number.POSITIVE_INFINITY
+}
+
 function isRetryableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
-  return /(?:\b429\b|\b50[02479]\b|\bnetwork\b|\btimeout\b|\babort\b|\bfetch failed\b|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)/i.test(
+  if (/\b401\b|\b403\b|unauthorized|forbidden|invalid[_ -]?api[_ -]?key|authentication|insufficient[_ -]?quota|billing/i.test(error.message)) {
+    return false
+  }
+  return /(?:\b429\b|\b5\d\d\b|\bnetwork\b|\btimeout\b|\babort\b|\bfetch failed\b|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)/i.test(
     error.message
   )
 }
 
 function retryDelayMs(index: number): number {
   return Math.min(12_000, 800 * 2 ** index)
+}
+
+function retryProgressMessage(error: unknown, attempt: number, total: number, delayMs: number): string {
+  const detail = retryErrorLabel(error)
+  const waitSeconds = Math.max(1, Math.round(delayMs / 1000))
+  const totalText = Number.isFinite(total) ? `${total}` : UNLIMITED_RETRY_LABEL
+  return `AI 接口暂时不可用（${detail}），${waitSeconds}s 后第 ${attempt}/${totalText} 次自动重试。可点击停止，或继续输入补充引导。`
+}
+
+function retryErrorLabel(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/\b429\b|rate limit/i.test(message)) return '限流'
+  if (/\b504\b|gateway|timeout|timed out/i.test(message)) return '代理超时'
+  if (/\b5\d\d\b/i.test(message)) return '服务端错误'
+  if (/network|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(message)) return '网络异常'
+  if (/abort/i.test(message)) return '请求超时'
+  return '可恢复错误'
 }
 
 function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
