@@ -2,6 +2,7 @@ import {
   Bot,
   Check,
   ChevronDown,
+  Download,
   ExternalLink,
   FileSpreadsheet,
   FileText,
@@ -16,6 +17,7 @@ import {
   Send,
   Settings,
   Sparkles,
+  Square,
   X
 } from 'lucide-react'
 import {
@@ -40,6 +42,7 @@ import type {
   GeneratedFile,
   OfficeKind,
   SettingsPatch,
+  UpdateStatus,
   WorkspaceFile,
   WorkspaceSnapshot
 } from '@shared/types'
@@ -60,14 +63,21 @@ export function App(): JSX.Element {
   const [targetFiles, setTargetFiles] = useState<WorkspaceFile[]>([])
   const [recentFiles, setRecentFiles] = useState<GeneratedFile[]>([])
   const [doclingStatus, setDoclingStatus] = useState<DoclingStatus | null>(null)
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [installingDocling, setInstallingDocling] = useState(false)
+  const [downloadingUpdate, setDownloadingUpdate] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [error, setError] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
   const settingsRef = useRef<AppSettings | null>(null)
+  const messagesRef = useRef<ChatMessage[]>([welcomeMessage])
+  const activeRequestIdRef = useRef<string | null>(null)
+  const activeAssistantIdRef = useRef<string | null>(null)
+  const runTokenRef = useRef(0)
 
   useEffect(() => {
     void bootstrap()
@@ -81,6 +91,10 @@ export function App(): JSX.Element {
   useEffect(() => {
     settingsRef.current = settings
   }, [settings])
+
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -128,6 +142,7 @@ export function App(): JSX.Element {
     setRecentFiles(await window.quickDocument.getRecentFiles())
     setWorkspaceSnapshot(await window.quickDocument.scanWorkspace(nextSettings.workspacePath))
     setDoclingStatus(await window.quickDocument.getDoclingStatus())
+    void window.quickDocument.checkForUpdates().then(setUpdateStatus).catch(() => undefined)
   }
 
   async function installDoclingDependency(): Promise<void> {
@@ -141,6 +156,23 @@ export function App(): JSX.Element {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setInstallingDocling(false)
+    }
+  }
+
+  async function downloadLatestUpdate(): Promise<void> {
+    setDownloadingUpdate(true)
+    setError('')
+    try {
+      const result = await window.quickDocument.downloadUpdate()
+      if (!result.ok) {
+        setError(result.message)
+        return
+      }
+      setUpdateStatus((current) => current ? { ...current, message: result.message } : current)
+    } catch (err) {
+      setError(formatRuntimeError(err))
+    } finally {
+      setDownloadingUpdate(false)
     }
   }
 
@@ -191,7 +223,7 @@ export function App(): JSX.Element {
   async function submit(event?: FormEvent): Promise<void> {
     event?.preventDefault()
     const content = input.trim()
-    if ((!content && attachments.length === 0) || busy) return
+    if (!content && attachments.length === 0) return
 
     const userMessage: ChatMessage = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -201,7 +233,16 @@ export function App(): JSX.Element {
       attachments,
       createdAt: new Date().toISOString()
     }
-    const requestId = userMessage.id
+    const baseMessages = busy ? messagesWithoutActiveDraft() : messagesRef.current
+    if (busy && activeRequestIdRef.current) {
+      void window.quickDocument.cancelMessage(activeRequestIdRef.current)
+    }
+    setInput('')
+    setAttachments([])
+    await startChatRequest([...baseMessages, userMessage], userMessage.id)
+  }
+
+  async function startChatRequest(requestMessages: ChatMessage[], requestId: string): Promise<void> {
     const assistantDraft: ChatMessage = {
       id: `${requestId}-assistant`,
       role: 'assistant',
@@ -215,17 +256,21 @@ export function App(): JSX.Element {
         }
       ]
     }
-    const requestMessages = [...messages, userMessage]
     const visibleMessages = [...requestMessages, assistantDraft]
+    const runToken = runTokenRef.current + 1
+    runTokenRef.current = runToken
+    activeRequestIdRef.current = requestId
+    activeAssistantIdRef.current = assistantDraft.id
+    messagesRef.current = visibleMessages
     setMessages(visibleMessages)
     void window.quickDocument.saveChatHistory(requestMessages)
-    setInput('')
-    setAttachments([])
     setBusy(true)
+    setStopping(false)
     setError('')
 
     const unsubscribe = window.quickDocument.onChatStream((event) => {
       if (event.requestId !== requestId || !event.message) return
+      if (runTokenRef.current !== runToken) return
       setMessages((current) =>
         current.map((message) =>
           message.id === assistantDraft.id
@@ -242,6 +287,7 @@ export function App(): JSX.Element {
         targetFiles,
         workspaceSnapshot: workspaceSnapshot || undefined
       })
+      if (runTokenRef.current !== runToken) return
       setMessages((current) => {
         const draft = current.find((message) => message.id === assistantDraft.id)
         const finalMessage: ChatMessage = {
@@ -250,6 +296,7 @@ export function App(): JSX.Element {
         }
         const withoutDraft = current.filter((message) => message.id !== assistantDraft.id)
         const updated = [...withoutDraft, finalMessage]
+        messagesRef.current = updated
         void window.quickDocument.saveChatHistory(updated)
         return updated
       })
@@ -260,6 +307,7 @@ export function App(): JSX.Element {
         await refreshWorkspaceSnapshot(settingsRef.current.workspacePath)
       }
     } catch (err) {
+      if (runTokenRef.current !== runToken) return
       const message = formatRuntimeError(err)
       setError(message)
       const failedMessage = appendProcessEvent(
@@ -272,12 +320,46 @@ export function App(): JSX.Element {
           message: `处理没有完成：${message}`
         }
       )
-      setMessages((current) => current.map((message) => (message.id === assistantDraft.id ? failedMessage : message)))
-      void window.quickDocument.saveChatHistory([...requestMessages, failedMessage])
+      setMessages((current) => {
+        const updated = current.map((message) => (message.id === assistantDraft.id ? failedMessage : message))
+        messagesRef.current = updated
+        void window.quickDocument.saveChatHistory([...requestMessages, failedMessage])
+        return updated
+      })
     } finally {
       unsubscribe()
-      setBusy(false)
+      if (runTokenRef.current === runToken) {
+        setBusy(false)
+        setStopping(false)
+        activeRequestIdRef.current = null
+        activeAssistantIdRef.current = null
+      }
     }
+  }
+
+  async function stopActiveRequest(): Promise<void> {
+    const requestId = activeRequestIdRef.current
+    if (!requestId) return
+    setStopping(true)
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === activeAssistantIdRef.current
+          ? appendProcessEvent(message, { type: 'status', message: '正在停止当前处理...' })
+          : message
+      )
+    )
+    const cancelled = await window.quickDocument.cancelMessage(requestId)
+    if (!cancelled) {
+      setStopping(false)
+      setBusy(false)
+      activeRequestIdRef.current = null
+      activeAssistantIdRef.current = null
+    }
+  }
+
+  function messagesWithoutActiveDraft(): ChatMessage[] {
+    const activeAssistantId = activeAssistantIdRef.current
+    return messagesRef.current.filter((message) => message.id !== activeAssistantId)
   }
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
@@ -374,6 +456,21 @@ export function App(): JSX.Element {
               </button>
             )}
           </div>
+          {updateStatus?.available && (
+            <div className="status-card update-card">
+              <Download size={17} />
+              <span>{updateStatus.message}</span>
+              <button
+                className="mini-action"
+                type="button"
+                onClick={() => void downloadLatestUpdate()}
+                disabled={downloadingUpdate}
+              >
+                {downloadingUpdate ? <Loader2 className="spin" size={14} /> : <Download size={14} />}
+                更新
+              </button>
+            </div>
+          )}
         </section>
 
         <section className="side-section recent-list">
@@ -526,7 +623,7 @@ export function App(): JSX.Element {
               )}
 
               <form
-                className="composer"
+                className={`composer ${busy ? 'has-stop' : ''}`}
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={onDrop}
                 onSubmit={submit}
@@ -562,14 +659,30 @@ export function App(): JSX.Element {
                     void onPaste(event)
                   }}
                   rows={1}
-                  placeholder="例如：把 xxx.docx 中第二段润色一下；也可以粘贴截图或拖入附件"
+                  placeholder={
+                    busy
+                      ? '可以继续输入补充引导，发送后会停止当前处理并按最新指令继续'
+                      : '例如：把 xxx.docx 中第二段润色一下；也可以粘贴截图或拖入附件'
+                  }
                 />
+                {busy && (
+                  <button
+                    className="stop-button"
+                    type="button"
+                    onClick={() => void stopActiveRequest()}
+                    disabled={stopping}
+                    title="停止当前处理"
+                  >
+                    {stopping ? <Loader2 className="spin" size={18} /> : <Square size={18} />}
+                  </button>
+                )}
                 <button
                   className="send-button"
                   type="submit"
-                  disabled={(!input.trim() && attachments.length === 0) || busy}
+                  disabled={(!input.trim() && attachments.length === 0) || stopping}
+                  title={busy ? '发送补充引导并重新开始' : '发送'}
                 >
-                  {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
+                  {busy && !input.trim() && attachments.length === 0 ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
                 </button>
               </form>
             </div>

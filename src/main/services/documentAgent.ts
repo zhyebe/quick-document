@@ -30,6 +30,7 @@ export interface DocumentAgentInput {
   documentPreviewContext?: string
   skillBrief?: string
   settings: AgentSettings
+  signal?: AbortSignal
   onProgress?: (message: string) => void
 }
 
@@ -86,6 +87,7 @@ export async function runDocumentAgent(input: DocumentAgentInput): Promise<Docum
   }
 
   try {
+    ensureNotCancelled(input.signal)
     if (input.settings.provider === 'anthropic') return await runAnthropicAgent(input)
     if (input.settings.wireApi === 'responses') {
       try {
@@ -112,6 +114,7 @@ async function runOpenAiChatAgent(input: DocumentAgentInput): Promise<DocumentAg
   const messages: Array<Record<string, unknown>> = buildOpenAiChatMessages(input)
 
   for (let turn = 0; turn < MAX_AGENT_TURNS; turn += 1) {
+    ensureNotCancelled(input.signal)
     input.onProgress?.(turn === 0 ? 'AI 正在结合文档 SKILL 理解请求...' : 'AI 正在根据工具结果继续处理...')
     const assistantMessage = await callOpenAiChatTurn(input, messages)
     const toolCalls = extractOpenAiChatToolCalls(assistantMessage)
@@ -131,6 +134,7 @@ async function runOpenAiChatAgent(input: DocumentAgentInput): Promise<DocumentAg
     })
 
     for (const toolCall of toolCalls) {
+      ensureNotCancelled(input.signal)
       const result = await executeAgentTool(input, toolCall, actionResults)
       messages.push({
         role: 'tool',
@@ -168,7 +172,8 @@ async function callOpenAiChatTurn(
           parallel_tool_calls: false
         })
       },
-      input.settings.requestTimeoutMs
+      input.settings.requestTimeoutMs,
+      input.signal
     )
     if (!response.ok) {
       const text = await response.text()
@@ -185,6 +190,7 @@ async function runOpenAiResponsesAgent(input: DocumentAgentInput): Promise<Docum
   let nextInput: unknown = buildOpenAiResponsesInput(input)
 
   for (let turn = 0; turn < MAX_AGENT_TURNS; turn += 1) {
+    ensureNotCancelled(input.signal)
     input.onProgress?.(turn === 0 ? 'AI 正在结合文档 SKILL 理解请求...' : 'AI 正在根据工具结果继续处理...')
     const responseData = await callOpenAiResponsesTurn(input, nextInput, previousResponseId)
     previousResponseId = stringValue(responseData.id) || previousResponseId
@@ -198,6 +204,7 @@ async function runOpenAiResponsesAgent(input: DocumentAgentInput): Promise<Docum
 
     const toolOutputs: Array<Record<string, unknown>> = []
     for (const toolCall of toolCalls) {
+      ensureNotCancelled(input.signal)
       const result = await executeAgentTool(input, toolCall, actionResults)
       toolOutputs.push({
         type: 'function_call_output',
@@ -242,7 +249,8 @@ async function callOpenAiResponsesTurn(
         },
         body: JSON.stringify(body)
       },
-      input.settings.requestTimeoutMs
+      input.settings.requestTimeoutMs,
+      input.signal
     )
     if (!response.ok) {
       const text = await response.text()
@@ -257,6 +265,7 @@ async function runAnthropicAgent(input: DocumentAgentInput): Promise<DocumentAge
   const messages: Array<Record<string, unknown>> = buildAnthropicMessages(input)
 
   for (let turn = 0; turn < MAX_AGENT_TURNS; turn += 1) {
+    ensureNotCancelled(input.signal)
     input.onProgress?.(turn === 0 ? 'AI 正在结合文档 SKILL 理解请求...' : 'AI 正在根据工具结果继续处理...')
     const responseData = await callAnthropicTurn(input, messages)
     const content = Array.isArray(responseData.content) ? responseData.content : []
@@ -286,6 +295,7 @@ async function runAnthropicAgent(input: DocumentAgentInput): Promise<DocumentAge
       role: 'user',
       content: await Promise.all(
         toolCalls.map(async (toolCall) => {
+          ensureNotCancelled(input.signal)
           const result = await executeAgentTool(input, toolCall, actionResults)
           return {
             type: 'tool_result',
@@ -326,7 +336,8 @@ async function callAnthropicTurn(
           messages
         })
       },
-      input.settings.requestTimeoutMs
+      input.settings.requestTimeoutMs,
+      input.signal
     )
     if (!response.ok) {
       const text = await response.text()
@@ -341,6 +352,7 @@ async function executeAgentTool(
   toolCall: AgentToolCall,
   actionResults: ActionResult[]
 ): Promise<AgentToolResult> {
+  ensureNotCancelled(input.signal)
   const args = parseToolArguments(toolCall.argumentsText)
   if (!args.ok) {
     return { ok: false, message: '工具参数不是有效 JSON。', error: args.error }
@@ -374,7 +386,10 @@ async function executeAgentTool(
     }
     input.onProgress?.(`AI 正在执行文档工具：${title}`)
     const latestSnapshot = scanWorkspace(input.workspaceSnapshot.rootPath)
-    const result = await executeDocumentAction(action, input.workspaceSnapshot.rootPath, latestSnapshot)
+    const result = await executeDocumentAction(action, input.workspaceSnapshot.rootPath, latestSnapshot, {
+      signal: input.signal
+    })
+    ensureNotCancelled(input.signal)
     if (result.ok) {
       actionResults.push(result)
       input.onProgress?.(result.summary)
@@ -834,10 +849,14 @@ function sanitizeRemoteError(text: string): string {
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
-  timeoutMs = DEFAULT_AI_REQUEST_TIMEOUT_MS
+  timeoutMs = DEFAULT_AI_REQUEST_TIMEOUT_MS,
+  signal?: AbortSignal
 ): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), Math.max(10_000, timeoutMs))
+  const abort = (): void => controller.abort()
+  if (signal?.aborted) abort()
+  signal?.addEventListener('abort', abort, { once: true })
   try {
     return await fetch(url, {
       ...init,
@@ -845,6 +864,7 @@ async function fetchWithTimeout(
     })
   } finally {
     clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
   }
 }
 
@@ -853,13 +873,15 @@ async function withRetries<T>(input: DocumentAgentInput, fn: () => Promise<T>): 
   const total = Math.max(1, input.settings.requestMaxRetries ?? DEFAULT_AI_MAX_RETRIES)
   for (let index = 0; index < total; index += 1) {
     try {
+      ensureNotCancelled(input.signal)
       return await fn()
     } catch (error) {
       lastError = error
+      ensureNotCancelled(input.signal)
       if (!isRetryableError(error) || index === total - 1) break
       const delay = retryDelayMs(index)
       input.onProgress?.(`AI 接口暂时不可用，正在第 ${index + 2}/${total} 次重试...`)
-      await new Promise((resolve) => setTimeout(resolve, delay))
+      await waitForRetry(delay, input.signal)
     }
   }
   throw lastError instanceof Error ? lastError : new Error('Agent request failed.')
@@ -876,8 +898,31 @@ function retryDelayMs(index: number): number {
   return Math.min(12_000, 800 * 2 ** index)
 }
 
+function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('已手动停止当前处理。'))
+      return
+    }
+    const done = (): void => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }
+    const timer = setTimeout(done, delayMs)
+    const abort = (): void => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+      reject(new Error('已手动停止当前处理。'))
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+}
+
 function formatAgentFailureMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
+  if (/手动停止|cancelled|aborted/i.test(message)) {
+    return '已手动停止当前处理，后续步骤没有继续执行。'
+  }
   if (/\b504\b|gateway|timeout|timed out|abort/i.test(message)) {
     return 'AI 接口或代理暂时超时，当前没有执行任何文档修改。你可以稍后重试，或者切换到可用的 cc-switch / OpenAI 代理配置。'
   }
@@ -888,6 +933,11 @@ function formatAgentFailureMessage(error: unknown): string {
     return 'AI 接口限流或额度不足，当前没有执行任何文档修改。请稍后重试或切换模型。'
   }
   return `AI 调用没有成功，所以没有修改任何文档。原因：${sanitizeRemoteError(message)}`
+}
+
+function ensureNotCancelled(signal?: AbortSignal): void {
+  if (!signal?.aborted) return
+  throw new Error('已手动停止当前处理。')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

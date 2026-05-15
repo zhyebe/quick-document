@@ -210,3 +210,25 @@ export interface ChatStreamEvent {
   type: 'status' | 'done' | 'error' | 'step-done'
   message?: string
 }
+
+export interface UpdateAsset {
+  name: string
+  url: string
+  size?: number
+}
+
+export interface UpdateStatus {
+  currentVersion: string
+  latestVersion?: string
+  available: boolean
+  releaseUrl?: string
+  asset?: UpdateAsset
+  message: string
+}
+
+export interface UpdateDownloadResult {
+  ok: boolean
+  message: string
+  filePath?: string
+  releaseUrl?: string
+}

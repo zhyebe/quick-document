@@ -9,12 +9,14 @@ import { buildDoclingPreviewContext, getDoclingStatus, installDocling } from './
 import { loadExternalAiConfig } from './services/externalAiConfig'
 import { SettingsStore } from './services/settingsStore'
 import { getEmbeddedOfficeSkillBrief, getRelevantOfficeSkillContext } from './services/skillRegistry'
+import { checkForUpdates, downloadAndOpenUpdate } from './services/updateService'
 import { scanWorkspace } from './services/workspaceFiles'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuitting = false
 let settingsStore: SettingsStore
+const activeChatControllers = new Map<string, AbortController>()
 const mainDir = dirname(fileURLToPath(import.meta.url))
 
 app.commandLine.appendSwitch('disable-features', 'MacWebContentsOcclusion,CalculateNativeWinOcclusion')
@@ -201,6 +203,12 @@ function registerIpc(): void {
   ipcMain.handle('chat:history:get', () => settingsStore.getChatHistory())
   ipcMain.handle('chat:history:save', (_event, messages) => settingsStore.saveChatHistory(messages))
   ipcMain.handle('chat:history:clear', () => settingsStore.clearChatHistory())
+  ipcMain.handle('chat:cancel', (_event, requestId: string) => {
+    const controller = activeChatControllers.get(requestId)
+    if (!controller) return false
+    controller.abort()
+    return true
+  })
   ipcMain.handle('docling:status', () => getDoclingStatus())
   ipcMain.handle('docling:install', async () => {
     const status = await getDoclingStatus()
@@ -236,9 +244,13 @@ function registerIpc(): void {
 
   ipcMain.handle('files:open', async (_event, filePath: string) => shell.openPath(filePath))
   ipcMain.handle('files:reveal', (_event, filePath: string) => shell.showItemInFolder(filePath))
+  ipcMain.handle('updates:check', () => checkForUpdates())
+  ipcMain.handle('updates:download', () => downloadAndOpenUpdate())
 
   ipcMain.handle('chat:send', async (event, request: ChatRequest): Promise<ChatResponse> => {
     const requestId = request.requestId || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const abortController = new AbortController()
+    activeChatControllers.set(requestId, abortController)
     const emit = (payload: Omit<ChatStreamEvent, 'requestId'>): void => {
       event.sender.send('chat:stream', { requestId, ...payload })
     }
@@ -282,6 +294,7 @@ function registerIpc(): void {
           model: publicSettings.model,
           apiKey: settingsStore.getApiKey()
         },
+        signal: abortController.signal,
         onProgress: (message: string) => emit({ type: 'status', message })
       }
       const agentResult = await runDocumentAgent(agentInput)
@@ -326,6 +339,8 @@ function registerIpc(): void {
         message: assistantMessage,
         generatedFiles: []
       }
+    } finally {
+      activeChatControllers.delete(requestId)
     }
   })
 }
@@ -352,6 +367,9 @@ function chatFailureMessage(error: unknown): string {
 
   if (/\b504\b|gateway|timeout|timed out/i.test(message)) {
     return 'AI 接口或代理暂时超时，当前没有修改任何文档。请稍后重试，或切换到可用的 cc-switch / OpenAI 代理配置。'
+  }
+  if (/手动停止|cancelled|aborted|abort/i.test(message)) {
+    return '已手动停止当前处理，后续步骤没有继续执行。'
   }
   if (/\b401\b|unauthorized|api key|authentication/i.test(message)) {
     return 'AI Key 不可用或认证失败，当前没有修改任何文档。请检查 cc-switch / API Key 配置。'

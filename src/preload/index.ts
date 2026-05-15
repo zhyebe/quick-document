@@ -9,6 +9,8 @@ import type {
   DoclingStatus,
   GeneratedFile,
   SettingsPatch,
+  UpdateDownloadResult,
+  UpdateStatus,
   WorkspaceSnapshot
 } from '@shared/types'
 
@@ -23,6 +25,8 @@ const api = {
     ipcRenderer.invoke('workspace:scan', rootPath),
   sendMessage: (request: ChatRequest): Promise<ChatResponse> =>
     ipcRenderer.invoke('chat:send', request),
+  cancelMessage: (requestId: string): Promise<boolean> =>
+    ipcRenderer.invoke('chat:cancel', requestId),
   onChatStream: (callback: (event: ChatStreamEvent) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ChatStreamEvent): void => callback(payload)
     ipcRenderer.on('chat:stream', listener)
@@ -36,7 +40,9 @@ const api = {
   clearChatHistory: (): Promise<ChatHistorySnapshot> => ipcRenderer.invoke('chat:history:clear'),
   getRecentFiles: (): Promise<GeneratedFile[]> => ipcRenderer.invoke('files:recent'),
   openFile: (filePath: string): Promise<string> => ipcRenderer.invoke('files:open', filePath),
-  revealFile: (filePath: string): Promise<void> => ipcRenderer.invoke('files:reveal', filePath)
+  revealFile: (filePath: string): Promise<void> => ipcRenderer.invoke('files:reveal', filePath),
+  checkForUpdates: (): Promise<UpdateStatus> => ipcRenderer.invoke('updates:check'),
+  downloadUpdate: (): Promise<UpdateDownloadResult> => ipcRenderer.invoke('updates:download')
 }
 
 contextBridge.exposeInMainWorld('quickDocument', api)

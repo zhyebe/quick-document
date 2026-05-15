@@ -37,11 +37,13 @@ const execFileAsync = promisify(execFile)
 export async function executeDocumentAction(
   action: OfficeAction,
   workspacePath: string,
-  workspaceSnapshot?: WorkspaceSnapshot
+  workspaceSnapshot?: WorkspaceSnapshot,
+  options: { signal?: AbortSignal } = {}
 ): Promise<ActionResult> {
   mkdirSync(workspacePath, { recursive: true })
 
   try {
+    ensureNotCancelled(options.signal)
     if (action.type === 'skill_task') {
       return unsupportedSkillTask(action)
     }
@@ -84,7 +86,7 @@ export async function executeDocumentAction(
     }
 
     if (action.type === 'run_javascript') {
-      const file = await runJavascriptDocumentAction(action, workspacePath, workspaceSnapshot)
+      const file = await runJavascriptDocumentAction(action, workspacePath, workspaceSnapshot, options)
       return {
         ok: true,
         actionType: action.type,
@@ -268,9 +270,11 @@ async function updateExcelCellsInZip(
 async function runJavascriptDocumentAction(
   action: OfficeAction,
   workspacePath: string,
-  workspaceSnapshot?: WorkspaceSnapshot
+  workspaceSnapshot?: WorkspaceSnapshot,
+  options: { signal?: AbortSignal } = {}
 ): Promise<GeneratedFile> {
   if (!action.script?.trim()) throw new Error('AI 未提供可执行脚本。')
+  ensureNotCancelled(options.signal)
   const workspaceRoot = resolve(workspacePath)
   const tempDir = mkdtempSync(join(tmpdir(), 'quick-document-ai-script-'))
   const scriptPath = join(tempDir, 'action.mjs')
@@ -285,6 +289,7 @@ async function runJavascriptDocumentAction(
       cwd: workspaceRoot,
       timeout: 120_000,
       maxBuffer: 16 * 1024 * 1024,
+      signal: options.signal,
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: '1',
@@ -292,6 +297,7 @@ async function runJavascriptDocumentAction(
         QUICK_DOCUMENT_RESULT_PATH: resultPath
       }
     })
+    ensureNotCancelled(options.signal)
     const generatedPath = readJavascriptActionResult(resultPath, stdout, action)
     const safePath = assertPathInsideWorkspace(generatedPath, workspaceRoot)
     statSync(safePath)
@@ -435,8 +441,16 @@ function assertPathInsideWorkspace(filePath: string, workspaceRoot: string): str
 
 function formatScriptError(error: unknown): string {
   if (!error || typeof error !== 'object') return String(error)
+  if (error instanceof Error && /AbortError|aborted|The operation was aborted/i.test(error.message)) {
+    return '已手动停止当前处理。'
+  }
   const record = error as { message?: string; stdout?: string; stderr?: string }
   return [record.message, record.stdout, record.stderr].filter(Boolean).join('\n')
+}
+
+function ensureNotCancelled(signal?: AbortSignal): void {
+  if (!signal?.aborted) return
+  throw new Error('已手动停止当前处理。')
 }
 
 interface WorkbookSheetInfo {
