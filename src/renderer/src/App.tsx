@@ -1,6 +1,8 @@
 import {
   Bot,
   Check,
+  ChevronDown,
+  ExternalLink,
   FileSpreadsheet,
   FileText,
   FolderOpen,
@@ -30,11 +32,14 @@ import type {
   ActionResult,
   AiProvider,
   AppSettings,
+  ChatAttachment,
   ChatMessage,
+  ChatProcessEvent,
+  ChatStreamEvent,
+  DoclingStatus,
   GeneratedFile,
   OfficeKind,
   SettingsPatch,
-  ChatAttachment,
   WorkspaceFile,
   WorkspaceSnapshot
 } from '@shared/types'
@@ -54,11 +59,15 @@ export function App(): JSX.Element {
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [targetFiles, setTargetFiles] = useState<WorkspaceFile[]>([])
   const [recentFiles, setRecentFiles] = useState<GeneratedFile[]>([])
+  const [doclingStatus, setDoclingStatus] = useState<DoclingStatus | null>(null)
+  const [installingDocling, setInstallingDocling] = useState(false)
   const [busy, setBusy] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [error, setError] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
+  const settingsRef = useRef<AppSettings | null>(null)
 
   useEffect(() => {
     void bootstrap()
@@ -70,8 +79,32 @@ export function App(): JSX.Element {
   }, [])
 
   useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const currentSettings = settingsRef.current
+      if (!currentSettings || typeof window.quickDocument === 'undefined') return
+      void refreshWorkspaceSnapshot(currentSettings.workspacePath)
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, busy])
+
+  useEffect(() => {
+    const textarea = composerTextareaRef.current
+    if (!textarea) return
+
+    textarea.style.height = 'auto'
+    const maxHeight = 180
+    const nextHeight = Math.min(textarea.scrollHeight, maxHeight)
+    textarea.style.height = `${nextHeight}px`
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden'
+  }, [input])
 
   const statusText = useMemo(() => {
     if (!settings) return '正在加载'
@@ -89,9 +122,26 @@ export function App(): JSX.Element {
     }
 
     const nextSettings = await window.quickDocument.getSettings()
+    const history = await window.quickDocument.getChatHistory()
     setSettings(nextSettings)
+    setMessages(history.messages.length > 0 ? history.messages : [welcomeMessage])
     setRecentFiles(await window.quickDocument.getRecentFiles())
     setWorkspaceSnapshot(await window.quickDocument.scanWorkspace(nextSettings.workspacePath))
+    setDoclingStatus(await window.quickDocument.getDoclingStatus())
+  }
+
+  async function installDoclingDependency(): Promise<void> {
+    setInstallingDocling(true)
+    setError('')
+    try {
+      const result = await window.quickDocument.installDocling()
+      setDoclingStatus(result)
+      if (!result.ok) setError(formatInstallError(result.message, result.log))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setInstallingDocling(false)
+    }
   }
 
   async function chooseWorkspaceRoot(): Promise<void> {
@@ -105,7 +155,17 @@ export function App(): JSX.Element {
 
   async function refreshWorkspace(): Promise<void> {
     if (!settings) return
-    setWorkspaceSnapshot(await window.quickDocument.scanWorkspace(settings.workspacePath))
+    await refreshWorkspaceSnapshot(settings.workspacePath)
+  }
+
+  async function refreshWorkspaceSnapshot(workspacePath: string): Promise<void> {
+    const snapshot = await window.quickDocument.scanWorkspace(workspacePath)
+    setWorkspaceSnapshot(snapshot)
+    setTargetFiles((current) =>
+      current
+        .map((target) => snapshot.files.find((file) => file.path === target.path) || target)
+        .filter((target) => snapshot.files.some((file) => file.path === target.path))
+    )
   }
 
   function toggleWorkspaceFile(file: WorkspaceFile): void {
@@ -115,6 +175,17 @@ export function App(): JSX.Element {
       }
       return [...current, file]
     })
+  }
+
+  async function openWorkspaceFile(file: WorkspaceFile): Promise<void> {
+    setError('')
+    const openError = await window.quickDocument.openFile(file.path)
+    if (openError) setError(openError)
+  }
+
+  async function revealWorkspaceFile(file: WorkspaceFile): Promise<void> {
+    setError('')
+    await window.quickDocument.revealFile(file.path)
   }
 
   async function submit(event?: FormEvent): Promise<void> {
@@ -130,32 +201,96 @@ export function App(): JSX.Element {
       attachments,
       createdAt: new Date().toISOString()
     }
-    const nextMessages = [...messages, userMessage]
-    setMessages(nextMessages)
+    const requestId = userMessage.id
+    const assistantDraft: ChatMessage = {
+      id: `${requestId}-assistant`,
+      role: 'assistant',
+      content: '正在读取当前文档目录...',
+      createdAt: new Date().toISOString(),
+      events: [
+        {
+          id: `${requestId}-event-start`,
+          createdAt: new Date().toISOString(),
+          message: '正在读取当前文档目录...'
+        }
+      ]
+    }
+    const requestMessages = [...messages, userMessage]
+    const visibleMessages = [...requestMessages, assistantDraft]
+    setMessages(visibleMessages)
+    void window.quickDocument.saveChatHistory(requestMessages)
     setInput('')
     setAttachments([])
     setBusy(true)
     setError('')
 
+    const unsubscribe = window.quickDocument.onChatStream((event) => {
+      if (event.requestId !== requestId || !event.message) return
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantDraft.id
+            ? appendProcessEvent(message, event)
+            : message
+        )
+      )
+    })
+
     try {
       const response = await window.quickDocument.sendMessage({
-        messages: nextMessages,
+        requestId,
+        messages: requestMessages,
         targetFiles,
         workspaceSnapshot: workspaceSnapshot || undefined
       })
-      setMessages((current) => [...current, response.message])
+      setMessages((current) => {
+        const draft = current.find((message) => message.id === assistantDraft.id)
+        const finalMessage: ChatMessage = {
+          ...response.message,
+          events: draft?.events || response.message.events
+        }
+        const withoutDraft = current.filter((message) => message.id !== assistantDraft.id)
+        const updated = [...withoutDraft, finalMessage]
+        void window.quickDocument.saveChatHistory(updated)
+        return updated
+      })
       if (response.generatedFiles.length > 0) {
         setRecentFiles(await window.quickDocument.getRecentFiles())
       }
+      if (settingsRef.current) {
+        await refreshWorkspaceSnapshot(settingsRef.current.workspacePath)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      const failedMessage = appendProcessEvent(
+        {
+          ...assistantDraft,
+          content: `处理没有完成：${err instanceof Error ? err.message : String(err)}`
+        },
+        {
+          type: 'error',
+          message: `处理没有完成：${err instanceof Error ? err.message : String(err)}`
+        }
+      )
+      setMessages((current) => current.map((message) => (message.id === assistantDraft.id ? failedMessage : message)))
+      void window.quickDocument.saveChatHistory([...requestMessages, failedMessage])
     } finally {
+      unsubscribe()
       setBusy(false)
     }
   }
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    if (event.key === 'Enter' && !event.shiftKey) {
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) {
+      return
+    }
+
+    const textarea = event.currentTarget
+    const selectionStart = textarea.selectionStart ?? textarea.value.length
+    const selectionEnd = textarea.selectionEnd ?? textarea.value.length
+    const isCursorAtEnd = selectionStart === textarea.value.length && selectionEnd === textarea.value.length
+    const textBeforeCursor = textarea.value.slice(0, selectionStart)
+
+    if (isCursorAtEnd && textBeforeCursor.endsWith('\n') && (input.trim() || attachments.length > 0)) {
       event.preventDefault()
       void submit()
     }
@@ -218,6 +353,25 @@ export function App(): JSX.Element {
           <div className="status-card">
             <MonitorUp size={17} />
             <span>{statusText}</span>
+          </div>
+          <div className="status-card">
+            <FileText size={17} />
+            <span>
+              {doclingStatus?.installed
+                ? `Docling 已启用：${doclingStatus.engine || 'available'}`
+                : doclingStatus?.message || '正在检测 Docling...'}
+            </span>
+            {doclingStatus && !doclingStatus.installed && (
+              <button
+                className="mini-action"
+                type="button"
+                onClick={() => void installDoclingDependency()}
+                disabled={installingDocling}
+              >
+                {installingDocling ? <Loader2 className="spin" size={14} /> : <Check size={14} />}
+                安装
+              </button>
+            )}
           </div>
         </section>
 
@@ -284,16 +438,42 @@ export function App(): JSX.Element {
                 workspaceSnapshot!.files.map((file) => {
                   const selected = targetFiles.some((item) => item.path === file.path)
                   return (
-                    <button
+                    <div
                       key={file.path}
                       className={`file-row ${selected ? 'selected' : ''}`}
-                      type="button"
-                      onClick={() => toggleWorkspaceFile(file)}
                       title={file.path}
                     >
-                      {kindIcon(file.kind)}
-                      <span>{file.name}</span>
-                    </button>
+                      <button
+                        className="file-select-button"
+                        type="button"
+                        onClick={() => toggleWorkspaceFile(file)}
+                        aria-pressed={selected}
+                        title={`选择：${file.name}`}
+                      >
+                        {kindIcon(file.kind)}
+                        <span>{file.name}</span>
+                      </button>
+                      <div className="file-row-actions">
+                        <button
+                          className="file-row-action"
+                          type="button"
+                          onClick={() => void openWorkspaceFile(file)}
+                          title="打开文件"
+                          aria-label={`打开文件：${file.name}`}
+                        >
+                          <ExternalLink size={14} />
+                        </button>
+                        <button
+                          className="file-row-action"
+                          type="button"
+                          onClick={() => void revealWorkspaceFile(file)}
+                          title="打开所在目录"
+                          aria-label={`打开所在目录：${file.name}`}
+                        >
+                          <FolderOpen size={14} />
+                        </button>
+                      </div>
+                    </div>
                   )
                 })
               )}
@@ -305,97 +485,93 @@ export function App(): JSX.Element {
               {messages.map((message) => (
                 <MessageBubble key={message.id} message={message} />
               ))}
-              {busy && (
-                <div className="message assistant">
-                  <div className="avatar">
-                    <Bot size={16} />
-                  </div>
-                  <div className="bubble compact">
-                    <Loader2 className="spin" size={16} />
-                    正在生成文档处理任务...
-                  </div>
-                </div>
-              )}
             </div>
 
             {error && <div className="error-bar">{error}</div>}
 
-            {targetFiles.length > 0 && (
-              <div className="target-strip">
-                {targetFiles.map((file) => (
-                  <span className="target-pill" key={file.path}>
-                    {kindIcon(file.kind)}
-                    {file.name}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setTargetFiles((current) => current.filter((item) => item.path !== file.path))
+            <div className="composer-dock">
+              {targetFiles.length > 0 && (
+                <div className="target-strip">
+                  {targetFiles.map((file) => (
+                    <span className="target-pill" key={file.path}>
+                      {kindIcon(file.kind)}
+                      {file.name}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setTargetFiles((current) => current.filter((item) => item.path !== file.path))
+                        }
+                        title="移除"
+                      >
+                        <X size={14} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {attachments.length > 0 && (
+                <div className="attachment-strip">
+                  {attachments.map((attachment) => (
+                    <AttachmentPill
+                      attachment={attachment}
+                      key={attachment.id}
+                      onRemove={() =>
+                        setAttachments((current) => current.filter((item) => item.id !== attachment.id))
                       }
-                      title="移除"
-                    >
-                      <X size={14} />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
+                    />
+                  ))}
+                </div>
+              )}
 
-            {attachments.length > 0 && (
-              <div className="attachment-strip">
-                {attachments.map((attachment) => (
-                  <AttachmentPill
-                    attachment={attachment}
-                    key={attachment.id}
-                    onRemove={() =>
-                      setAttachments((current) => current.filter((item) => item.id !== attachment.id))
-                    }
-                  />
-                ))}
-              </div>
-            )}
-
-            <form
-              className="composer"
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={onDrop}
-              onSubmit={submit}
-            >
-              <input
-                ref={attachmentInputRef}
-                className="hidden-file-input"
-                type="file"
-                multiple
-                accept="image/*,audio/*,video/*,.pdf,.txt,.md,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
-                onChange={(event) => {
-                  void addFiles(event.target.files)
-                  event.currentTarget.value = ''
-                }}
-              />
-              <button className="tool-button" type="button" onClick={chooseWorkspaceRoot} title="选择文件夹">
-                <FolderOpen size={18} />
-              </button>
-              <button
-                className="tool-button"
-                type="button"
-                onClick={() => attachmentInputRef.current?.click()}
-                title="添加附件"
+              <form
+                className="composer"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={onDrop}
+                onSubmit={submit}
               >
-                <Paperclip size={18} />
-              </button>
-              <textarea
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={onComposerKeyDown}
-                onPaste={(event) => {
-                  void onPaste(event)
-                }}
-                rows={1}
-                placeholder="例如：把 xxx.docx 中第二段润色一下；也可以粘贴截图或拖入附件"
-              />
-              <button className="send-button" type="submit" disabled={(!input.trim() && attachments.length === 0) || busy}>
-                {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
-              </button>
-            </form>
+                <input
+                  ref={attachmentInputRef}
+                  className="hidden-file-input"
+                  type="file"
+                  multiple
+                  accept="image/*,audio/*,video/*,.pdf,.txt,.md,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                  onChange={(event) => {
+                    void addFiles(event.target.files)
+                    event.currentTarget.value = ''
+                  }}
+                />
+                <button className="tool-button" type="button" onClick={chooseWorkspaceRoot} title="选择文件夹">
+                  <FolderOpen size={18} />
+                </button>
+                <button
+                  className="tool-button"
+                  type="button"
+                  onClick={() => attachmentInputRef.current?.click()}
+                  title="添加附件"
+                >
+                  <Paperclip size={18} />
+                </button>
+                <textarea
+                  ref={composerTextareaRef}
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={onComposerKeyDown}
+                  onPaste={(event) => {
+                    void onPaste(event)
+                  }}
+                  rows={1}
+                  placeholder="例如：把 xxx.docx 中第二段润色一下；也可以粘贴截图或拖入附件"
+                />
+                <button
+                  className="send-button"
+                  type="submit"
+                  disabled={(!input.trim() && attachments.length === 0) || busy}
+                >
+                  {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
+                </button>
+              </form>
+            </div>
           </section>
         </div>
       </main>
@@ -404,6 +580,12 @@ export function App(): JSX.Element {
         <SettingsPanel
           settings={settings}
           onClose={() => setSettingsOpen(false)}
+          onClearHistory={async () => {
+            await window.quickDocument.clearChatHistory()
+            setMessages([welcomeMessage])
+            const nextSettings = await window.quickDocument.getSettings()
+            setSettings(nextSettings)
+          }}
           onSaved={async (next) => {
             setSettings(next)
             setWorkspaceSnapshot(await window.quickDocument.scanWorkspace(next.workspacePath))
@@ -415,6 +597,53 @@ export function App(): JSX.Element {
   )
 }
 
+function appendProcessEvent(message: ChatMessage, event: Pick<ChatStreamEvent, 'type' | 'message'>): ChatMessage {
+  const nextText = event.message?.trim()
+  if (!nextText) return message
+  const events = message.events || []
+  const status = processEventStatus(event.type)
+  const lastEvent = events[events.length - 1]
+  if (lastEvent && isSimilarProcessMessage(lastEvent.message, nextText)) {
+    return {
+      ...message,
+      events: [
+        ...events.slice(0, -1),
+        {
+          ...lastEvent,
+          createdAt: new Date().toISOString(),
+          message: nextText,
+          status
+        }
+      ]
+    }
+  }
+
+  return {
+    ...message,
+    events: [
+      ...events,
+      {
+        id: `${message.id}-event-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        createdAt: new Date().toISOString(),
+        message: nextText,
+        status
+      }
+    ].slice(-80)
+  }
+}
+
+function processEventStatus(type: ChatStreamEvent['type']): ChatProcessEvent['status'] {
+  if (type === 'done' || type === 'step-done') return 'done'
+  if (type === 'error') return 'error'
+  return 'running'
+}
+
+function isSimilarProcessMessage(previous: string, next: string): boolean {
+  if (previous === next) return true
+  const normalize = (value: string): string => value.replace(/（\d+s）/g, '').replace(/\d+/g, '#')
+  return normalize(previous) === normalize(next)
+}
+
 function MessageBubble({ message }: { message: ChatMessage }): JSX.Element {
   const isAssistant = message.role === 'assistant'
 
@@ -423,6 +652,9 @@ function MessageBubble({ message }: { message: ChatMessage }): JSX.Element {
       <div className="avatar">{isAssistant ? <Bot size={16} /> : <span>你</span>}</div>
       <div className="message-stack">
         <div className="bubble">{message.content}</div>
+        {isAssistant && message.events && message.events.length > 0 && (
+          <ProcessLog events={message.events} />
+        )}
         {message.targetFiles && message.targetFiles.length > 0 && (
           <div className="bubble-files">
             {message.targetFiles.map((file) => (
@@ -452,6 +684,52 @@ function MessageBubble({ message }: { message: ChatMessage }): JSX.Element {
   )
 }
 
+function isProcessActive(events: ChatProcessEvent[]): boolean {
+  const lastEvent = events[events.length - 1]
+  return Boolean(lastEvent && lastEvent.status !== 'done' && lastEvent.status !== 'error')
+}
+
+function ProcessLog({ events }: { events: ChatProcessEvent[] }): JSX.Element {
+  const active = isProcessActive(events)
+  const [expanded, setExpanded] = useState(false)
+
+  const doneCount = events.filter((event) => event.status === 'done').length
+  const errorCount = events.filter((event) => event.status === 'error').length
+  const lastEvent = events[events.length - 1]
+  const summary = active
+    ? lastEvent?.message || '正在处理...'
+    : errorCount > 0
+      ? `${errorCount} 个步骤遇到问题`
+      : `完成 ${doneCount || events.length} 个步骤`
+
+  return (
+    <div className={`process-log ${expanded ? 'expanded' : 'collapsed'}`} aria-label="处理过程">
+      <button
+        className="process-toggle"
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <ChevronDown size={15} />
+        <span>处理过程</span>
+        {active && <Loader2 className="spin" size={14} />}
+        <em>{summary}</em>
+      </button>
+      {expanded && (
+        <div className="process-events">
+          {events.map((event) => (
+            <div className={`process-event ${event.status || 'running'}`} key={event.id}>
+              <i aria-hidden="true" />
+              <span>{formatTime(event.createdAt)}</span>
+              <p>{event.message}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ActionCard({ action }: { action: ActionResult }): JSX.Element {
   return (
     <div className={`action-card ${action.ok ? 'ok' : 'fail'}`}>
@@ -459,17 +737,11 @@ function ActionCard({ action }: { action: ActionResult }): JSX.Element {
         {action.ok ? <Check size={16} /> : <X size={16} />}
         <div>
           <strong>{action.summary}</strong>
-          {action.workflow?.taskFilePath && <span>{action.workflow.taskFilePath}</span>}
           {action.file && <span>{formatBytes(action.file.size)}</span>}
           {action.error && <span>{action.error}</span>}
         </div>
       </div>
       <div className="action-buttons">
-        {action.workflow?.taskFilePath && (
-          <button type="button" onClick={() => void window.quickDocument.revealFile(action.workflow!.taskFilePath!)}>
-            定位
-          </button>
-        )}
         {action.file && (
           <>
             <button type="button" onClick={() => void window.quickDocument.openFile(action.file!.path)}>
@@ -542,10 +814,12 @@ function AttachmentPreview({ attachment }: { attachment: ChatAttachment }): JSX.
 function SettingsPanel({
   settings,
   onClose,
+  onClearHistory,
   onSaved
 }: {
   settings: AppSettings
   onClose: () => void
+  onClearHistory: () => void | Promise<void>
   onSaved: (settings: AppSettings) => void | Promise<void>
 }): JSX.Element {
   const [form, setForm] = useState<SettingsPatch>({
@@ -559,6 +833,7 @@ function SettingsPanel({
   })
   const [saving, setSaving] = useState(false)
   const [importMessage, setImportMessage] = useState('')
+  const [clearing, setClearing] = useState(false)
 
   async function chooseWorkspace(): Promise<void> {
     const selected = await window.quickDocument.chooseWorkspace()
@@ -589,6 +864,16 @@ function SettingsPanel({
       setImportMessage(`已导入：${imported.source}`)
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function clearHistory(): Promise<void> {
+    setClearing(true)
+    try {
+      await onClearHistory()
+      setImportMessage('已清除聊天历史和本地对话缓存。')
+    } finally {
+      setClearing(false)
     }
   }
 
@@ -707,6 +992,17 @@ function SettingsPanel({
           <span>关闭窗口后驻留在托盘</span>
         </label>
 
+        <div className="cache-row">
+          <div>
+            <strong>聊天历史缓存</strong>
+            <span>当前已缓存 {settings.cachedMessageCount} 条消息。</span>
+          </div>
+          <button type="button" onClick={clearHistory} disabled={clearing || saving}>
+            {clearing ? <Loader2 className="spin" size={16} /> : <X size={16} />}
+            清除缓存
+          </button>
+        </div>
+
         <footer>
           <button className="plain-button" type="button" onClick={onClose}>
             取消
@@ -722,15 +1018,34 @@ function SettingsPanel({
 }
 
 function kindIcon(kind: OfficeKind): JSX.Element {
-  if (kind === 'excel') return <FileSpreadsheet size={16} />
-  if (kind === 'powerpoint') return <Presentation size={16} />
-  return <FileText size={16} />
+  const icon =
+    kind === 'excel'
+      ? <FileSpreadsheet size={16} />
+      : kind === 'powerpoint'
+        ? <Presentation size={16} />
+        : <FileText size={16} />
+  return <span className="file-kind-icon">{icon}</span>
 }
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function formatTime(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function formatInstallError(message: string, log: string | undefined): string {
+  if (!log?.trim()) return message
+  const lines = log
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  return `${message}\n\n${lines.slice(-8).join('\n')}`
 }
 
 function attachmentKindForMime(mimeType: string): ChatAttachment['kind'] {

@@ -13,6 +13,11 @@ export type OfficeActionType =
   | 'revise_docx'
   | 'revise_xlsx'
   | 'revise_pptx'
+  | 'copy_file'
+  | 'find_files'
+  | 'replace_text'
+  | 'update_excel_cells'
+  | 'run_javascript'
   | 'skill_task'
 
 export interface ChatMessage {
@@ -23,6 +28,14 @@ export interface ChatMessage {
   targetFiles?: WorkspaceFile[]
   attachments?: ChatAttachment[]
   actions?: ActionResult[]
+  events?: ChatProcessEvent[]
+}
+
+export interface ChatProcessEvent {
+  id: string
+  createdAt: string
+  message: string
+  status?: 'running' | 'done' | 'error'
 }
 
 export interface ChatAttachment {
@@ -76,6 +89,19 @@ export interface AppSettings {
   hasApiKey: boolean
   apiConfigSource?: string
   usesExternalApiConfig: boolean
+  cachedMessageCount: number
+}
+
+export interface DoclingStatus {
+  installed: boolean
+  engine?: string
+  installCommand?: string
+  message: string
+}
+
+export interface DoclingInstallResult extends DoclingStatus {
+  ok: boolean
+  log?: string
 }
 
 export interface SettingsPatch {
@@ -122,10 +148,15 @@ export interface OfficeAction {
   title?: string
   filename?: string
   sourcePath?: string
+  destinationPath?: string
   targetPaths?: string[]
+  query?: string
   skillName?: 'documents' | 'spreadsheets' | 'presentations'
   instructions?: string
   expectedOutput?: string
+  script?: string
+  replacements?: Array<{ find: string; replace: string }>
+  cellUpdates?: Array<{ sheet?: string; cell: string; value: unknown }>
   sections?: WordSection[]
   sheets?: SheetPlan[]
   slides?: SlidePlan[]
@@ -134,6 +165,7 @@ export interface OfficeAction {
 export interface PlannedResponse {
   reply: string
   actions: OfficeAction[]
+  executedResults?: ActionResult[]
 }
 
 export interface GeneratedFile {
@@ -157,6 +189,7 @@ export interface ActionResult {
 }
 
 export interface ChatRequest {
+  requestId?: string
   messages: ChatMessage[]
   targetFiles: WorkspaceFile[]
   workspaceSnapshot?: WorkspaceSnapshot
@@ -165,4 +198,15 @@ export interface ChatRequest {
 export interface ChatResponse {
   message: ChatMessage
   generatedFiles: GeneratedFile[]
+}
+
+export interface ChatHistorySnapshot {
+  messages: ChatMessage[]
+  updatedAt?: string
+}
+
+export interface ChatStreamEvent {
+  requestId: string
+  type: 'status' | 'done' | 'error' | 'step-done'
+  message?: string
 }

@@ -1,43 +1,100 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
-import { join } from 'node:path'
-import type { ChatRequest, ChatResponse, WorkspaceSnapshot } from '@shared/types'
-import { planDocumentWork } from './services/aiPlanner'
-import { executeDocumentAction } from './services/documentService'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron'
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import type { ChatRequest, ChatResponse, ChatStreamEvent, WorkspaceSnapshot } from '@shared/types'
+import { runDocumentAgent } from './services/documentAgent'
+import { buildDocumentPreviewContext } from './services/documentTextPreview'
+import { buildDoclingPreviewContext, getDoclingStatus, installDocling } from './services/doclingService'
 import { loadExternalAiConfig } from './services/externalAiConfig'
 import { SettingsStore } from './services/settingsStore'
-import { getEmbeddedOfficeSkillBrief } from './services/skillRegistry'
+import { getEmbeddedOfficeSkillBrief, getRelevantOfficeSkillContext } from './services/skillRegistry'
 import { scanWorkspace } from './services/workspaceFiles'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuitting = false
 let settingsStore: SettingsStore
+const mainDir = dirname(fileURLToPath(import.meta.url))
+
+app.commandLine.appendSwitch('disable-features', 'MacWebContentsOcclusion,CalculateNativeWinOcclusion')
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    logMain('second-instance: showing existing window')
+    showMainWindow()
+  })
+}
 
 const trayIcon = nativeImage.createFromDataURL(
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAQAAAC1+jfqAAAAKUlEQVR42mNgQANnz551YGRkZIABJgYGRgYGBiYGBpYGBgZGJgYGAAAKYgIrZbrZ2QAAAABJRU5ErkJggg=='
 )
 
-function createWindow(): void {
+function logMain(message: string, error?: unknown): void {
+  try {
+    const logDir = app.getPath('userData')
+    mkdirSync(logDir, { recursive: true })
+    const details =
+      error instanceof Error
+        ? `${error.message}\n${error.stack || ''}`
+        : error
+          ? String(error)
+          : ''
+    appendFileSync(join(logDir, 'main.log'), `[${new Date().toISOString()}] ${message}${details ? `\n${details}` : ''}\n`, 'utf8')
+  } catch {
+    // Logging must never prevent the app from opening.
+  }
+}
+
+function createWindow(): BrowserWindow {
+  if (mainWindow && !mainWindow.isDestroyed()) return mainWindow
+
+  logMain('createWindow:start')
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 780,
     minWidth: 940,
     minHeight: 620,
     title: 'Quick Document',
+    show: true,
     backgroundColor: '#f7f7f5',
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
-      preload: join(__dirname, '../preload/index.mjs'),
+      preload: join(mainDir, '../preload/index.mjs'),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: false
     }
   })
 
+  logMain('createWindow:browserWindow-created')
+  ensureWindowVisible(mainWindow)
+  logMain('createWindow:window-visible-checked')
+  wireWindowDiagnostics(mainWindow)
+  logMain('createWindow:diagnostics-wired')
+  showMainWindow()
+  logMain('createWindow:initial-show-called')
+
+  const loadPromise =
+    !app.isPackaged && process.env.ELECTRON_RENDERER_URL
+      ? mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+      : mainWindow.loadFile(join(mainDir, '../renderer/index.html'))
+
+  loadPromise.catch((error) => {
+    logMain('window:load failed', error)
+    mainWindow?.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(
+        '<!doctype html><meta charset="utf-8"><body style="font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;padding:32px;background:#f7f7f5;color:#26231f"><h2>Quick Document 启动失败</h2><p>渲染页面加载失败，请把 main.log 发给开发者。</p></body>'
+      )}`
+    )
+  })
+
   if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
-    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+    logMain(`window:load url ${process.env.ELECTRON_RENDERER_URL}`)
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    logMain(`window:load file ${join(mainDir, '../renderer/index.html')}`)
   }
 
   mainWindow.on('close', (event) => {
@@ -45,6 +102,33 @@ function createWindow(): void {
       event.preventDefault()
       mainWindow?.hide()
     }
+  })
+
+  mainWindow.on('closed', () => {
+    logMain('window:closed')
+    mainWindow = null
+  })
+
+  setTimeout(() => showMainWindow(), 500)
+  setTimeout(() => showMainWindow(), 1800)
+  return mainWindow
+}
+
+function wireWindowDiagnostics(window: BrowserWindow): void {
+  window.once('ready-to-show', () => {
+    logMain('window:ready-to-show')
+    showMainWindow()
+  })
+  window.webContents.on('did-finish-load', () => logMain('renderer:did-finish-load'))
+  window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    logMain(`renderer:did-fail-load ${errorCode} ${errorDescription} ${validatedURL}`)
+  })
+  window.webContents.on('render-process-gone', (_event, details) => {
+    logMain(`renderer:render-process-gone ${details.reason} ${details.exitCode}`)
+  })
+  window.webContents.on('unresponsive', () => logMain('window:unresponsive'))
+  window.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 2) logMain(`renderer:console ${level} ${message} (${sourceId}:${line})`)
   })
 }
 
@@ -72,9 +156,33 @@ function createTray(): void {
 }
 
 function showMainWindow(): void {
-  if (!mainWindow) createWindow()
-  mainWindow?.show()
-  mainWindow?.focus()
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow()
+  ensureWindowVisible(window)
+  if (window.isMinimized()) window.restore()
+  window.setSkipTaskbar(false)
+  window.show()
+  window.moveTop()
+  window.focus()
+  app.focus({ steal: true })
+  if (process.platform === 'darwin') {
+    window.setAlwaysOnTop(true, 'floating')
+    setTimeout(() => {
+      if (!window.isDestroyed()) window.setAlwaysOnTop(false)
+    }, 250)
+  }
+  logMain(`showMainWindow visible=${window.isVisible()} minimized=${window.isMinimized()}`)
+}
+
+function ensureWindowVisible(window: BrowserWindow): void {
+  const bounds = window.getBounds()
+  const display = screen.getDisplayMatching(bounds) || screen.getPrimaryDisplay()
+  const area = display.workArea
+  const isOutside =
+    bounds.x + Math.min(bounds.width, 120) < area.x ||
+    bounds.y + Math.min(bounds.height, 80) < area.y ||
+    bounds.x > area.x + area.width - 120 ||
+    bounds.y > area.y + area.height - 80
+  if (isOutside) window.center()
 }
 
 function registerIpc(): void {
@@ -90,6 +198,27 @@ function registerIpc(): void {
     }
   })
   ipcMain.handle('files:recent', () => settingsStore.getRecentFiles())
+  ipcMain.handle('chat:history:get', () => settingsStore.getChatHistory())
+  ipcMain.handle('chat:history:save', (_event, messages) => settingsStore.saveChatHistory(messages))
+  ipcMain.handle('chat:history:clear', () => settingsStore.clearChatHistory())
+  ipcMain.handle('docling:status', () => getDoclingStatus())
+  ipcMain.handle('docling:install', async () => {
+    const status = await getDoclingStatus()
+    if (status.installed) return { ...status, ok: true, log: 'Docling already installed.' }
+    const result = await dialog.showMessageBox({
+      type: 'question',
+      buttons: ['允许安装', '取消'],
+      defaultId: 0,
+      cancelId: 1,
+      title: '安装 Docling',
+      message: 'Quick Document 需要安装 Docling 来增强文档解析。',
+      detail: `将执行：${status.installCommand || 'python -m pip install --user docling'}\n\n该操作需要访问 Python/PyPI，Windows 和 macOS 都会使用当前系统 Python 环境。`
+    })
+    if (result.response !== 0) {
+      return { ...status, ok: false, message: '已取消安装 Docling。' }
+    }
+    return installDocling()
+  })
 
   ipcMain.handle('workspace:choose', async () => {
     const result = await dialog.showOpenDialog({
@@ -108,56 +237,113 @@ function registerIpc(): void {
   ipcMain.handle('files:open', async (_event, filePath: string) => shell.openPath(filePath))
   ipcMain.handle('files:reveal', (_event, filePath: string) => shell.showItemInFolder(filePath))
 
-  ipcMain.handle('chat:send', async (_event, request: ChatRequest): Promise<ChatResponse> => {
+  ipcMain.handle('chat:send', async (event, request: ChatRequest): Promise<ChatResponse> => {
+    const requestId = request.requestId || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const emit = (payload: Omit<ChatStreamEvent, 'requestId'>): void => {
+      event.sender.send('chat:stream', { requestId, ...payload })
+    }
+
     const publicSettings = settingsStore.getPublicSettings()
-    const workspaceSnapshot = request.workspaceSnapshot || scanWorkspace(publicSettings.workspacePath)
-    const plan = await planDocumentWork({
+    emit({ type: 'status', message: '正在读取当前文档目录...' })
+    const workspaceSnapshot = scanWorkspace(publicSettings.workspacePath)
+    const latestPrompt = request.messages[request.messages.length - 1]?.content || ''
+    emit({
+      type: 'status',
+      message: `已读取目录，发现 ${workspaceSnapshot.files.length} 个 Office 文件。正在读取相关文档预览...`
+    })
+    const documentPreviewContext = await buildDocumentPreviewContext(
+      latestPrompt,
+      request.targetFiles || [],
+      workspaceSnapshot
+    )
+    const doclingPreviewContext = await buildDoclingPreviewContext(
+      request.targetFiles.length > 0 ? request.targetFiles : workspaceSnapshot.files
+    )
+    emit({ type: 'status', message: '正在把目录、文档预览和 Office SKILL 发送给 AI...' })
+    const heartbeat = startChatHeartbeat(emit)
+    const agentInput = {
       messages: request.messages,
       targetFiles: request.targetFiles || [],
       workspaceSnapshot,
-      skillBrief: getEmbeddedOfficeSkillBrief(),
+      documentPreviewContext: [documentPreviewContext, doclingPreviewContext ? `Docling 解析结果：\n${doclingPreviewContext}` : '']
+        .filter(Boolean)
+        .join('\n\n---\n\n'),
+      skillBrief: [
+        getEmbeddedOfficeSkillBrief(),
+        getRelevantOfficeSkillContext(latestPrompt, request.targetFiles || [], workspaceSnapshot)
+      ]
+        .filter(Boolean)
+        .join('\n\n---\n\n'),
       settings: {
         provider: publicSettings.provider,
         wireApi: publicSettings.wireApi,
         baseUrl: publicSettings.baseUrl,
         model: publicSettings.model,
         apiKey: settingsStore.getApiKey()
-      }
-    })
-
-    const results = []
-    for (const action of plan.actions) {
-      const result = await executeDocumentAction(action, publicSettings.workspacePath)
-      if (result.file && result.file.kind !== 'unknown') settingsStore.addRecentFile(result.file)
-      results.push(result)
-    }
-
-    const generatedFiles = results.flatMap((result) => (result.file ? [result.file] : []))
-    return {
-      message: {
-        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        role: 'assistant',
-        content: buildAssistantReply(plan.reply, results),
-        createdAt: new Date().toISOString(),
-        actions: results
       },
+      onProgress: (message: string) => emit({ type: 'status', message })
+      }
+    const agentResult = await runDocumentAgent(agentInput)
+      .finally(heartbeat)
+
+    const results = agentResult.actionResults
+    for (const result of results) {
+      if (result.file && result.file.kind !== 'unknown') settingsStore.addRecentFile(result.file)
+      emit({
+        type: result.ok ? 'step-done' : 'error',
+        message: result.ok ? result.summary : `${result.summary}${result.error ? `：${result.error}` : ''}`
+      })
+    }
+    const generatedFiles = results.flatMap((result) => (result.file ? [result.file] : []))
+    const assistantMessage = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      role: 'assistant' as const,
+      content: buildAssistantReply(agentResult.reply, results),
+      createdAt: new Date().toISOString(),
+      actions: results
+    }
+    settingsStore.saveChatHistory([...request.messages, assistantMessage])
+    emit({ type: 'done', message: generatedFiles.length > 0 ? '处理完成，已刷新文档目录和产物列表。' : '处理完成。' })
+
+    return {
+      message: assistantMessage,
       generatedFiles
     }
   })
 }
 
-function buildAssistantReply(reply: string, results: Awaited<ReturnType<typeof executeDocumentAction>>[]): string {
+function buildAssistantReply(reply: string, results: Array<{ ok: boolean; summary: string; error?: string; file?: unknown }>): string {
   if (results.length === 0) return reply
   const lines = results.map((result) => {
-    if (result.workflow) return `- ${result.summary}`
     if (result.ok && result.file) return `- ${result.summary}`
     return `- ${result.summary}: ${result.error || 'unknown error'}`
   })
   return `${reply}\n\n处理结果：\n${lines.join('\n')}`
 }
 
+function startChatHeartbeat(emit: (payload: Omit<ChatStreamEvent, 'requestId'>) => void): () => void {
+  const startedAt = Date.now()
+  let index = 0
+  const messages = [
+    'AI 正在读取目录上下文和 Office SKILL...',
+    'AI 正在决定是否调用文档工具...',
+    'AI 正在按工具结果继续处理...',
+    'AI 仍在处理，复杂文档可能需要更久...'
+  ]
+  const timer = setInterval(() => {
+    const elapsed = Math.round((Date.now() - startedAt) / 1000)
+    emit({ type: 'status', message: `${messages[index % messages.length]}（${elapsed}s）` })
+    index += 1
+  }, 1800)
+  return () => clearInterval(timer)
+}
+
+process.on('uncaughtException', (error) => logMain('process:uncaughtException', error))
+process.on('unhandledRejection', (reason) => logMain('process:unhandledRejection', reason))
+
 app.whenReady().then(() => {
   app.setAppUserModelId('com.quickdocument.desktop')
+  logMain('app:ready')
   settingsStore = new SettingsStore()
   registerIpc()
   createWindow()
@@ -167,9 +353,12 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
     showMainWindow()
   })
+}).catch((error) => {
+  logMain('app:ready failed', error)
 })
 
 app.on('before-quit', () => {
+  logMain('app:before-quit')
   isQuitting = true
 })
 

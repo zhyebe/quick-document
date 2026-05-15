@@ -2,7 +2,24 @@ import { readdirSync, statSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import type { OfficeKind, WorkspaceFile, WorkspaceSnapshot } from '@shared/types'
 
-const OFFICE_EXTENSIONS = new Set(['.docx', '.xlsx', '.ppt', '.pptx'])
+const INDEXED_DOCUMENT_EXTENSIONS = new Set([
+  '.docx',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.pdf',
+  '.html',
+  '.htm',
+  '.md',
+  '.csv',
+  '.txt',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.webp',
+  '.tif',
+  '.tiff'
+])
 const SKIPPED_DIRECTORIES = new Set([
   'node_modules',
   '.git',
@@ -35,9 +52,14 @@ export function toWorkspaceFile(filePath: string): WorkspaceFile {
   }
 }
 
-export function scanWorkspace(rootPath: string, limit = 200): WorkspaceSnapshot {
+export function scanWorkspace(rootPath: string, limit = 2000): WorkspaceSnapshot {
   const files: WorkspaceFile[] = []
   walk(rootPath, files, limit)
+  files.sort((first, second) => {
+    const firstTime = first.modifiedAt ? Date.parse(first.modifiedAt) : 0
+    const secondTime = second.modifiedAt ? Date.parse(second.modifiedAt) : 0
+    return secondTime - firstTime
+  })
 
   return {
     rootPath,
@@ -65,7 +87,7 @@ function walk(currentPath: string, files: WorkspaceFile[], limit: number): void 
       continue
     }
 
-    if (!entry.isFile() || !OFFICE_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
+    if (!entry.isFile() || !INDEXED_DOCUMENT_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
 
     try {
       files.push(toWorkspaceFile(fullPath))

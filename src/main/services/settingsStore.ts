@@ -5,6 +5,8 @@ import type {
   AiProvider,
   AiWireApi,
   AppSettings,
+  ChatHistorySnapshot,
+  ChatMessage,
   ExternalAiConfig,
   GeneratedFile,
   SettingsPatch
@@ -21,6 +23,7 @@ interface StoredSettings {
   apiKeyCipher?: string
   apiKeyPlain?: string
   recentFiles: GeneratedFile[]
+  chatHistory: ChatHistorySnapshot
 }
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
@@ -48,7 +51,8 @@ export class SettingsStore {
       residentMode: stored.residentMode,
       hasApiKey: Boolean(external?.apiKey || storedApiKey),
       apiConfigSource: external?.source || (storedApiKey ? 'Quick Document 设置' : undefined),
-      usesExternalApiConfig: Boolean(external?.apiKey)
+      usesExternalApiConfig: Boolean(external?.apiKey),
+      cachedMessageCount: stored.chatHistory.messages.length
     }
   }
 
@@ -132,6 +136,49 @@ export class SettingsStore {
     })
   }
 
+  public getChatHistory(): ChatHistorySnapshot {
+    return this.read().chatHistory
+  }
+
+  public saveChatHistory(messages: ChatMessage[]): ChatHistorySnapshot {
+    const stored = this.read()
+    const sanitized = messages
+      .filter((message) => message.role === 'user' || message.role === 'assistant')
+      .slice(-80)
+      .map((message) => ({
+        ...message,
+        attachments: message.attachments?.map((attachment) => ({
+          ...attachment,
+          dataUrl:
+            attachment.dataUrl.length > 2_000_000
+              ? ''
+              : attachment.dataUrl
+        }))
+      }))
+    const chatHistory = {
+      messages: sanitized,
+      updatedAt: new Date().toISOString()
+    }
+    this.write({
+      ...stored,
+      chatHistory
+    })
+    return chatHistory
+  }
+
+  public clearChatHistory(): ChatHistorySnapshot {
+    const stored = this.read()
+    const chatHistory = {
+      messages: [],
+      updatedAt: new Date().toISOString()
+    }
+    this.write({
+      ...stored,
+      chatHistory
+    })
+    return chatHistory
+  }
+
   private read(): StoredSettings {
     if (!existsSync(this.settingsPath)) {
       const defaults = this.defaults()
@@ -164,7 +211,10 @@ export class SettingsStore {
       model: DEFAULT_MODEL,
       workspacePath: join(app.getPath('documents'), 'Quick Document'),
       residentMode: true,
-      recentFiles: []
+      recentFiles: [],
+      chatHistory: {
+        messages: []
+      }
     }
   }
 

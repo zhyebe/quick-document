@@ -3,6 +3,10 @@ import type {
   AppSettings,
   ChatRequest,
   ChatResponse,
+  ChatHistorySnapshot,
+  ChatStreamEvent,
+  DoclingInstallResult,
+  DoclingStatus,
   GeneratedFile,
   SettingsPatch,
   WorkspaceSnapshot
@@ -19,6 +23,17 @@ const api = {
     ipcRenderer.invoke('workspace:scan', rootPath),
   sendMessage: (request: ChatRequest): Promise<ChatResponse> =>
     ipcRenderer.invoke('chat:send', request),
+  onChatStream: (callback: (event: ChatStreamEvent) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: ChatStreamEvent): void => callback(payload)
+    ipcRenderer.on('chat:stream', listener)
+    return () => ipcRenderer.removeListener('chat:stream', listener)
+  },
+  getDoclingStatus: (): Promise<DoclingStatus> => ipcRenderer.invoke('docling:status'),
+  installDocling: (): Promise<DoclingInstallResult> => ipcRenderer.invoke('docling:install'),
+  getChatHistory: (): Promise<ChatHistorySnapshot> => ipcRenderer.invoke('chat:history:get'),
+  saveChatHistory: (messages: ChatHistorySnapshot['messages']): Promise<ChatHistorySnapshot> =>
+    ipcRenderer.invoke('chat:history:save', messages),
+  clearChatHistory: (): Promise<ChatHistorySnapshot> => ipcRenderer.invoke('chat:history:clear'),
   getRecentFiles: (): Promise<GeneratedFile[]> => ipcRenderer.invoke('files:recent'),
   openFile: (filePath: string): Promise<string> => ipcRenderer.invoke('files:open', filePath),
   revealFile: (filePath: string): Promise<void> => ipcRenderer.invoke('files:reveal', filePath)

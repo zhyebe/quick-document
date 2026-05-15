@@ -145,6 +145,31 @@ button {
   border-radius: 8px;
 }
 
+.status-card span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.mini-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 8px;
+  color: #dff8f2;
+  font-size: 12px;
+  background: rgba(15, 118, 110, 0.4);
+  border: 1px solid rgba(94, 234, 212, 0.25);
+  border-radius: 6px;
+}
+
+.mini-action:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
 .recent-list {
   min-height: 0;
 }
@@ -162,6 +187,22 @@ button {
   white-space: nowrap;
 }
 
+.file-kind-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  line-height: 0;
+}
+
+.file-kind-icon svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  stroke-width: 2;
+}
+
 .muted {
   margin: 0;
   color: #8d96a5;
@@ -176,7 +217,9 @@ button {
 .workspace {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
   min-width: 0;
+  min-height: 0;
   -webkit-app-region: no-drag;
 }
 
@@ -288,25 +331,61 @@ button {
 .file-row {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 6px;
   width: 100%;
   min-height: 36px;
-  padding: 0 9px;
+  padding: 2px 4px;
   color: #374151;
-  text-align: left;
   background: transparent;
   border: 1px solid transparent;
   border-radius: 8px;
 }
 
-.file-row span {
+.file-select-button {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 5px;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+
+.file-select-button > span:not(.file-kind-icon) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.file-row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+}
+
+.file-row-action {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: #6b7280;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+}
+
 .file-row:hover {
   background: #f4f6f8;
+}
+
+.file-row-action:hover {
+  color: #0f766e;
+  background: #e8f6f2;
 }
 
 .file-row.selected {
@@ -317,14 +396,17 @@ button {
 
 .chat-panel {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  grid-template-rows: minmax(0, 1fr) auto auto;
   min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .messages {
   min-height: 0;
   overflow: auto;
-  padding: 4px 0 20px;
+  padding: 4px 0 22px;
+  scroll-behavior: smooth;
 }
 
 .message {
@@ -394,6 +476,124 @@ button {
   align-items: center;
   gap: 8px;
   color: #4b5563;
+}
+
+.process-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: min(100%, 720px);
+  padding: 6px 0 4px;
+  color: #56616f;
+}
+
+.process-toggle {
+  display: grid;
+  grid-template-columns: 16px auto 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 0 8px 0 3px;
+  color: #667085;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.process-toggle:hover {
+  background: #edf1f4;
+}
+
+.process-toggle svg:first-child {
+  transition: transform 140ms ease;
+}
+
+.process-log.collapsed .process-toggle svg:first-child {
+  transform: rotate(-90deg);
+}
+
+.process-toggle em {
+  min-width: 0;
+  overflow: hidden;
+  color: #8a93a1;
+  font-style: normal;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-events {
+  padding-top: 2px;
+}
+
+.process-event {
+  display: grid;
+  grid-template-columns: 16px 72px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px 0;
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.process-event i {
+  position: relative;
+  display: block;
+  align-self: stretch;
+  width: 16px;
+  height: 100%;
+}
+
+.process-event i::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -8px;
+  bottom: -8px;
+  width: 2px;
+  transform: translateX(-50%);
+  background: #d8dde5;
+}
+
+.process-event i::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  transform: translate(-50%, -50%);
+  background: #9aa1ad;
+  border: 2px solid #f6f7f7;
+  border-radius: 50%;
+}
+
+.process-event.done i::after {
+  background: #0f766e;
+}
+
+.process-event.error i::after {
+  background: #dc2626;
+}
+
+.process-event span {
+  color: #9aa1ad;
+  font-variant-numeric: tabular-nums;
+}
+
+.process-event p {
+  margin: 0;
+  color: #4b5563;
+  white-space: pre-wrap;
+}
+
+.process-event.error p {
+  color: #991b1b;
 }
 
 .bubble-files,
@@ -509,7 +709,7 @@ button {
   gap: 8px;
   max-width: 860px;
   width: 100%;
-  margin: 0 auto 10px;
+  margin: 0 auto;
 }
 
 .attachment-strip {
@@ -518,7 +718,7 @@ button {
   gap: 8px;
   max-width: 860px;
   width: 100%;
-  margin: 0 auto 10px;
+  margin: 0 auto;
 }
 
 .attachment-pill {
@@ -585,6 +785,15 @@ button {
   border: 0;
 }
 
+.composer-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 10px 0 0;
+  background: #f6f7f7;
+}
+
 .composer {
   display: grid;
   grid-template-columns: 38px 38px minmax(0, 1fr) 38px;
@@ -607,13 +816,15 @@ button {
 .composer textarea {
   min-height: 38px;
   max-height: 150px;
-  padding: 8px 2px;
+  padding: 7px 2px;
   resize: none;
   color: #1f2937;
   background: transparent;
   border: 0;
   outline: 0;
   line-height: 1.5;
+  overflow: hidden;
+  scrollbar-width: thin;
 }
 
 .error-bar {
@@ -770,6 +981,54 @@ button {
 .import-row span {
   color: #667085;
   font-size: 12px;
+}
+
+.cache-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 18px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #dfe4ea;
+  border-radius: 8px;
+}
+
+.cache-row strong,
+.cache-row span {
+  display: block;
+}
+
+.cache-row strong {
+  color: #1f2937;
+  font-size: 13px;
+}
+
+.cache-row span {
+  margin-top: 3px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.cache-row button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 12px;
+  color: #991b1b;
+  white-space: nowrap;
+  background: #fff7f7;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+}
+
+.cache-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .settings-panel input:focus,
