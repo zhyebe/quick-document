@@ -1,11 +1,19 @@
 import { app, safeStorage } from 'electron'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { AiProvider, AppSettings, ExternalAiConfig, GeneratedFile, SettingsPatch } from '@shared/types'
+import type {
+  AiProvider,
+  AiWireApi,
+  AppSettings,
+  ExternalAiConfig,
+  GeneratedFile,
+  SettingsPatch
+} from '@shared/types'
 import { loadExternalAiConfig } from './externalAiConfig'
 
 interface StoredSettings {
   provider: AiProvider
+  wireApi: AiWireApi
   baseUrl: string
   model: string
   workspacePath: string
@@ -28,18 +36,19 @@ export class SettingsStore {
   public getPublicSettings(): AppSettings {
     const stored = this.read()
     const storedApiKey = this.getStoredApiKey(stored)
-    const external = storedApiKey ? null : loadExternalAiConfig()
+    const external = loadExternalAiConfig()
     this.ensureWorkspace(stored.workspacePath)
 
     return {
       provider: external?.provider || stored.provider,
+      wireApi: external?.wireApi || stored.wireApi,
       baseUrl: external?.baseUrl || stored.baseUrl,
       model: external?.model || stored.model,
       workspacePath: stored.workspacePath,
       residentMode: stored.residentMode,
-      hasApiKey: Boolean(storedApiKey || external?.apiKey),
-      apiConfigSource: storedApiKey ? 'Quick Document 设置' : external?.source,
-      usesExternalApiConfig: Boolean(!storedApiKey && external?.apiKey)
+      hasApiKey: Boolean(external?.apiKey || storedApiKey),
+      apiConfigSource: external?.source || (storedApiKey ? 'Quick Document 设置' : undefined),
+      usesExternalApiConfig: Boolean(external?.apiKey)
     }
   }
 
@@ -48,6 +57,7 @@ export class SettingsStore {
     const next: StoredSettings = {
       ...stored,
       provider: patch.provider || stored.provider,
+      wireApi: patch.wireApi || stored.wireApi,
       baseUrl: patch.baseUrl?.trim() || stored.baseUrl,
       model: patch.model?.trim() || stored.model,
       workspacePath: patch.workspacePath?.trim() || stored.workspacePath,
@@ -79,6 +89,7 @@ export class SettingsStore {
   public importExternalConfig(config: ExternalAiConfig): AppSettings {
     return this.save({
       provider: config.provider,
+      wireApi: config.wireApi,
       baseUrl: config.baseUrl,
       model: config.model,
       apiKey: config.apiKey
@@ -87,10 +98,13 @@ export class SettingsStore {
 
   public getApiKey(): string {
     const stored = this.read()
+    const external = loadExternalAiConfig()
+    if (external?.apiKey) return external.apiKey
+
     const storedApiKey = this.getStoredApiKey(stored)
     if (storedApiKey) return storedApiKey
 
-    return loadExternalAiConfig()?.apiKey || ''
+    return ''
   }
 
   private getStoredApiKey(stored: StoredSettings): string {
@@ -145,6 +159,7 @@ export class SettingsStore {
   private defaults(): StoredSettings {
     return {
       provider: 'openai',
+      wireApi: 'chat_completions',
       baseUrl: DEFAULT_BASE_URL,
       model: DEFAULT_MODEL,
       workspacePath: join(app.getPath('documents'), 'Quick Document'),

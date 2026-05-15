@@ -118,6 +118,7 @@ function registerIpc(): void {
       skillBrief: getEmbeddedOfficeSkillBrief(),
       settings: {
         provider: publicSettings.provider,
+        wireApi: publicSettings.wireApi,
         baseUrl: publicSettings.baseUrl,
         model: publicSettings.model,
         apiKey: settingsStore.getApiKey()

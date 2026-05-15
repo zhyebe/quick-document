@@ -8,6 +8,7 @@ import {
   Loader2,
   MessageSquareText,
   MonitorUp,
+  Paperclip,
   Presentation,
   RefreshCw,
   Send,
@@ -15,7 +16,16 @@ import {
   Sparkles,
   X
 } from 'lucide-react'
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ClipboardEvent,
+  DragEvent,
+  FormEvent,
+  KeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
 import type {
   ActionResult,
   AiProvider,
@@ -24,6 +34,7 @@ import type {
   GeneratedFile,
   OfficeKind,
   SettingsPatch,
+  ChatAttachment,
   WorkspaceFile,
   WorkspaceSnapshot
 } from '@shared/types'
@@ -40,15 +51,22 @@ export function App(): JSX.Element {
   const [workspaceSnapshot, setWorkspaceSnapshot] = useState<WorkspaceSnapshot | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage])
   const [input, setInput] = useState('')
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [targetFiles, setTargetFiles] = useState<WorkspaceFile[]>([])
   const [recentFiles, setRecentFiles] = useState<GeneratedFile[]>([])
   const [busy, setBusy] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [error, setError] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  const attachmentInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     void bootstrap()
+    const timer = window.setInterval(() => {
+      if (typeof window.quickDocument === 'undefined') return
+      void window.quickDocument.getSettings().then(setSettings)
+    }, 10000)
+    return () => window.clearInterval(timer)
   }, [])
 
   useEffect(() => {
@@ -102,18 +120,20 @@ export function App(): JSX.Element {
   async function submit(event?: FormEvent): Promise<void> {
     event?.preventDefault()
     const content = input.trim()
-    if (!content || busy) return
+    if ((!content && attachments.length === 0) || busy) return
 
     const userMessage: ChatMessage = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       role: 'user',
-      content,
+      content: content || '请根据附件内容处理文档。',
       targetFiles,
+      attachments,
       createdAt: new Date().toISOString()
     }
     const nextMessages = [...messages, userMessage]
     setMessages(nextMessages)
     setInput('')
+    setAttachments([])
     setBusy(true)
     setError('')
 
@@ -139,6 +159,40 @@ export function App(): JSX.Element {
       event.preventDefault()
       void submit()
     }
+  }
+
+  async function addFiles(files: FileList | File[] | null): Promise<void> {
+    if (!files) return
+    setError('')
+    const next: ChatAttachment[] = []
+    for (const file of Array.from(files)) {
+      if (file.size > 25 * 1024 * 1024) {
+        setError(`${file.name} 超过 25MB，暂时没有加入附件。`)
+        continue
+      }
+      next.push(await fileToAttachment(file))
+    }
+    if (next.length > 0) {
+      setAttachments((current) => [...current, ...next].slice(0, 12))
+    }
+  }
+
+  async function onPaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
+    const files = Array.from(event.clipboardData.files)
+    const imageItems = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file))
+    const pastedFiles = files.length > 0 ? files : imageItems
+    if (pastedFiles.length > 0) {
+      event.preventDefault()
+      await addFiles(pastedFiles)
+    }
+  }
+
+  function onDrop(event: DragEvent<HTMLFormElement>): void {
+    event.preventDefault()
+    void addFiles(event.dataTransfer.files)
   }
 
   return (
@@ -286,18 +340,59 @@ export function App(): JSX.Element {
               </div>
             )}
 
-            <form className="composer" onSubmit={submit}>
+            {attachments.length > 0 && (
+              <div className="attachment-strip">
+                {attachments.map((attachment) => (
+                  <AttachmentPill
+                    attachment={attachment}
+                    key={attachment.id}
+                    onRemove={() =>
+                      setAttachments((current) => current.filter((item) => item.id !== attachment.id))
+                    }
+                  />
+                ))}
+              </div>
+            )}
+
+            <form
+              className="composer"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={onDrop}
+              onSubmit={submit}
+            >
+              <input
+                ref={attachmentInputRef}
+                className="hidden-file-input"
+                type="file"
+                multiple
+                accept="image/*,audio/*,video/*,.pdf,.txt,.md,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                onChange={(event) => {
+                  void addFiles(event.target.files)
+                  event.currentTarget.value = ''
+                }}
+              />
               <button className="tool-button" type="button" onClick={chooseWorkspaceRoot} title="选择文件夹">
                 <FolderOpen size={18} />
+              </button>
+              <button
+                className="tool-button"
+                type="button"
+                onClick={() => attachmentInputRef.current?.click()}
+                title="添加附件"
+              >
+                <Paperclip size={18} />
               </button>
               <textarea
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={onComposerKeyDown}
+                onPaste={(event) => {
+                  void onPaste(event)
+                }}
                 rows={1}
-                placeholder="例如：把 xxx.docx 中第二段润色一下"
+                placeholder="例如：把 xxx.docx 中第二段润色一下；也可以粘贴截图或拖入附件"
               />
-              <button className="send-button" type="submit" disabled={!input.trim() || busy}>
+              <button className="send-button" type="submit" disabled={(!input.trim() && attachments.length === 0) || busy}>
                 {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
               </button>
             </form>
@@ -335,6 +430,13 @@ function MessageBubble({ message }: { message: ChatMessage }): JSX.Element {
                 {kindIcon(file.kind)}
                 {file.name}
               </span>
+            ))}
+          </div>
+        )}
+        {message.attachments && message.attachments.length > 0 && (
+          <div className="message-attachments">
+            {message.attachments.map((attachment) => (
+              <AttachmentPreview attachment={attachment} key={attachment.id} />
             ))}
           </div>
         )}
@@ -383,6 +485,60 @@ function ActionCard({ action }: { action: ActionResult }): JSX.Element {
   )
 }
 
+function AttachmentPill({
+  attachment,
+  onRemove
+}: {
+  attachment: ChatAttachment
+  onRemove: () => void
+}): JSX.Element {
+  return (
+    <span className="attachment-pill">
+      {attachment.kind === 'image' && <img alt="" src={attachment.dataUrl} />}
+      <span>{attachmentLabel(attachment)}</span>
+      <button type="button" onClick={onRemove} title="移除附件">
+        <X size={14} />
+      </button>
+    </span>
+  )
+}
+
+function AttachmentPreview({ attachment }: { attachment: ChatAttachment }): JSX.Element {
+  if (attachment.kind === 'image') {
+    return (
+      <figure className="attachment-preview image">
+        <img alt={attachment.name || 'attachment'} src={attachment.dataUrl} />
+        <figcaption>{attachmentLabel(attachment)}</figcaption>
+      </figure>
+    )
+  }
+
+  if (attachment.kind === 'audio') {
+    return (
+      <figure className="attachment-preview media">
+        <audio controls src={attachment.dataUrl} />
+        <figcaption>{attachmentLabel(attachment)}</figcaption>
+      </figure>
+    )
+  }
+
+  if (attachment.kind === 'video') {
+    return (
+      <figure className="attachment-preview media">
+        <video controls src={attachment.dataUrl} />
+        <figcaption>{attachmentLabel(attachment)}</figcaption>
+      </figure>
+    )
+  }
+
+  return (
+    <div className="attachment-preview file">
+      <Paperclip size={15} />
+      <span>{attachmentLabel(attachment)}</span>
+    </div>
+  )
+}
+
 function SettingsPanel({
   settings,
   onClose,
@@ -394,6 +550,7 @@ function SettingsPanel({
 }): JSX.Element {
   const [form, setForm] = useState<SettingsPatch>({
     provider: settings.provider,
+    wireApi: settings.wireApi,
     baseUrl: settings.baseUrl,
     model: settings.model,
     workspacePath: settings.workspacePath,
@@ -424,7 +581,7 @@ function SettingsPanel({
     try {
       const imported = await window.quickDocument.importExternalSettings()
       if (!imported) {
-        setImportMessage('未找到可导入的 cc-switch / Claude 配置。')
+        setImportMessage('未找到可导入的 cc-switch / Codex / Claude 配置。')
         return
       }
 
@@ -451,7 +608,7 @@ function SettingsPanel({
         <div className="import-row">
           <button type="button" onClick={importExternalSettings} disabled={saving}>
             <KeyRound size={16} />
-            导入 cc-switch / Claude 配置
+            导入 cc-switch / Codex / Claude 配置
           </button>
           <span>
             {importMessage ||
@@ -476,6 +633,23 @@ function SettingsPanel({
           >
             <option value="openai">OpenAI-compatible</option>
             <option value="anthropic">Anthropic-compatible</option>
+          </select>
+        </label>
+
+        <label>
+          <span>API 类型</span>
+          <select
+            value={form.wireApi || settings.wireApi}
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                wireApi: event.target.value as SettingsPatch['wireApi']
+              }))
+            }
+          >
+            <option value="chat_completions">OpenAI Chat Completions</option>
+            <option value="responses">OpenAI Responses</option>
+            <option value="anthropic_messages">Anthropic Messages</option>
           </select>
         </label>
 
@@ -557,4 +731,34 @@ function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function attachmentKindForMime(mimeType: string): ChatAttachment['kind'] {
+  if (mimeType.startsWith('image/')) return 'image'
+  if (mimeType.startsWith('audio/')) return 'audio'
+  if (mimeType.startsWith('video/')) return 'video'
+  return 'file'
+}
+
+function fileToAttachment(file: File): Promise<ChatAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      resolve({
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        kind: attachmentKindForMime(file.type),
+        name: file.name || undefined,
+        mimeType: file.type || 'application/octet-stream',
+        dataUrl: String(reader.result),
+        size: file.size
+      })
+    }
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+}
+
+function attachmentLabel(attachment: ChatAttachment): string {
+  const name = attachment.name || attachment.mimeType
+  return attachment.size ? `${name} · ${formatBytes(attachment.size)}` : name
 }

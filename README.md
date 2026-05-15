@@ -9,12 +9,13 @@ AI快速处理文档软件，高效自带SKILL。
 - 桌面驻留：关闭窗口后可隐藏到托盘继续运行。
 - 路径驱动：扫描本地目录中的 `.docx`、`.xlsx`、`.ppt`、`.pptx` 文件。
 - 轻量指令：例如“把 xxx.docx 第二段润色一下”或“把表格里第 3 行金额改成 1200”。
+- 多模态上下文：可粘贴截图、拖入图片/音频/视频/文件作为文档处理参考，但核心仍限定在 Word、Excel、PPT 工作流。
 - Skill 路由：
   - `.docx` → `resources/skills/documents`
   - `.xlsx` → `resources/skills/spreadsheets`
   - `.ppt` / `.pptx` → `resources/skills/presentations`
 - 打包发布：`resources/skills` 会随应用一起进入 DMG / EXE。
-- AI 配置：支持 OpenAI-compatible 和 Anthropic-compatible，可手动配置 `baseUrl`、`model`、`apiKey`，也可从本机 cc-switch / Claude 配置导入。
+- AI 配置：支持 OpenAI-compatible、OpenAI Responses 和 Anthropic-compatible。默认自动跟随本机 cc-switch 当前 Codex/OpenAI 配置，并可回退到 Claude 或手动配置。
 
 ## 开发运行
 

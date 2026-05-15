@@ -1,5 +1,6 @@
 import type {
   AiProvider,
+  ChatAttachment,
   ChatMessage,
   OfficeAction,
   OfficeActionType,
@@ -10,6 +11,7 @@ import type {
 
 interface PlannerSettings {
   provider: AiProvider
+  wireApi: 'chat_completions' | 'responses' | 'anthropic_messages'
   baseUrl: string
   model: string
   apiKey: string
@@ -28,6 +30,7 @@ You are the workflow planner for Quick Document, a desktop AI document-processin
 The product is not a general chatbot. It only handles Word, Excel, and PowerPoint document workflows.
 Users select local folders or file paths. The AI plans a skill-driven workflow that operates directly on those paths.
 User instructions can be short. Infer the target file from selected paths, workspace filenames, and filename mentions.
+Users may attach screenshots, images, audio, video, or files, but attachments are only context for Office document work.
 
 Return strict JSON only. Do not wrap it in markdown.
 
@@ -54,6 +57,8 @@ Schema:
 Rules:
 - Prefer skill_task for real document workflows. This lets the local executor call embedded skills directly on local paths.
 - Use documents for .docx, spreadsheets for .xlsx, and presentations for .ppt/.pptx.
+- Filter every request through the Office skills scope before answering. If the user asks for unrelated general work, politely redirect them to a Word, Excel, or PowerPoint document workflow and return an empty actions array.
+- Use screenshots/images/files only to understand document content, target locations, formatting, or edit requirements. Do not become a general image/audio/video assistant.
 - If one workflow touches multiple file types, return multiple skill_task actions in execution order.
 - Keep instructions concise and executable. Do not ask for long briefs when the user's edit intent is clear.
 - Use create_docx/create_xlsx/create_pptx only for simple new-file fallback drafts.
@@ -87,6 +92,10 @@ async function callPlannerModel(input: PlannerInput): Promise<string> {
     return callAnthropicPlanner(input)
   }
 
+  if (input.settings.wireApi === 'responses') {
+    return callOpenAiResponsesPlanner(input)
+  }
+
   return callOpenAiPlanner(input)
 }
 
@@ -101,7 +110,7 @@ async function callOpenAiPlanner(input: PlannerInput): Promise<string> {
         model: input.settings.model,
         temperature: 0.2,
         response_format: { type: 'json_object' },
-        messages: buildPlannerMessages(input)
+        messages: buildOpenAiChatMessages(input)
       })
     })
 
@@ -114,6 +123,39 @@ async function callOpenAiPlanner(input: PlannerInput): Promise<string> {
     choices?: Array<{ message?: { content?: string } }>
   }
   return data.choices?.[0]?.message?.content || ''
+}
+
+async function callOpenAiResponsesPlanner(input: PlannerInput): Promise<string> {
+  const response = await fetch(`${input.settings.baseUrl.replace(/\/$/, '')}/responses`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${input.settings.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: input.settings.model,
+      temperature: 0.2,
+      instructions: buildSystemText(input),
+      input: buildOpenAiResponsesInput(input)
+    })
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`OpenAI Responses request failed: ${response.status} ${text.slice(0, 300)}`)
+  }
+
+  const data = (await response.json()) as {
+    output_text?: string
+    output?: Array<{
+      content?: Array<{ type?: string; text?: string }>
+    }>
+  }
+  return (
+    data.output_text ||
+    data.output?.flatMap((item) => item.content || []).find((item) => item.text)?.text ||
+    ''
+  )
 }
 
 async function callAnthropicPlanner(input: PlannerInput): Promise<string> {
@@ -155,19 +197,56 @@ function buildSystemText(input: PlannerInput): string {
     : SYSTEM_PROMPT
 }
 
-function buildAnthropicMessages(input: PlannerInput): Array<{ role: 'user' | 'assistant'; content: string }> {
-  return buildPlannerMessages(input)
+function buildAnthropicMessages(
+  input: PlannerInput
+): Array<{ role: 'user' | 'assistant'; content: string | Array<Record<string, unknown>> }> {
+  return buildPlannerMessageParts(input)
     .filter((message) => message.role !== 'system')
     .map((message) => ({
       role: message.role === 'assistant' ? 'assistant' : 'user',
-      content: message.content
+      content: message.attachments?.length
+        ? [
+            { type: 'text', text: message.content },
+            ...message.attachments.flatMap((attachment) => anthropicAttachmentParts(attachment))
+          ]
+        : message.content
     }))
 }
 
-function buildPlannerMessages(input: PlannerInput): Array<{ role: string; content: string }> {
+function buildOpenAiChatMessages(input: PlannerInput): Array<{ role: string; content: unknown }> {
+  return buildPlannerMessageParts(input).map((message) => ({
+    role: message.role,
+    content: message.attachments?.length
+      ? [
+          { type: 'text', text: message.content },
+          ...message.attachments.flatMap((attachment) => openAiChatAttachmentParts(attachment))
+        ]
+      : message.content
+  }))
+}
+
+function buildOpenAiResponsesInput(input: PlannerInput): Array<{ role: string; content: Array<Record<string, unknown>> }> {
+  return buildPlannerMessageParts(input)
+    .filter((message) => message.role !== 'system')
+    .map((message) => ({
+      role: message.role === 'assistant' ? 'assistant' : 'user',
+      content: [
+        {
+          type: message.role === 'assistant' ? 'output_text' : 'input_text',
+          text: message.content
+        },
+        ...(message.attachments || []).flatMap((attachment) => openAiResponsesAttachmentParts(attachment))
+      ]
+    }))
+}
+
+function buildPlannerMessageParts(
+  input: PlannerInput
+): Array<{ role: string; content: string; attachments?: ChatAttachment[] }> {
   const recent = input.messages.slice(-8).map((message) => ({
     role: message.role === 'assistant' ? 'assistant' : 'user',
-    content: message.content
+    content: appendAttachmentContext(message.content, message.attachments),
+    attachments: message.attachments?.filter((attachment) => attachment.kind === 'image')
   }))
 
   const targetContext =
@@ -209,6 +288,81 @@ function buildPlannerMessages(input: PlannerInput): Array<{ role: string; conten
     ...workspaceContext,
     ...targetContext,
     ...recent
+  ]
+}
+
+function appendAttachmentContext(content: string, attachments: ChatAttachment[] | undefined): string {
+  if (!attachments?.length) return content
+  const lines = attachments.map((attachment) => {
+    const label =
+      attachment.kind === 'image'
+        ? '图片/截图'
+        : attachment.kind === 'audio'
+          ? '音频'
+          : attachment.kind === 'video'
+            ? '视频'
+            : '文件'
+    return `- ${label}: ${attachment.name || attachment.mimeType} (${attachment.mimeType}, ${formatAttachmentSize(
+      attachment.size
+    )})`
+  })
+  return `${content}\n\n用户同时附加了以下材料：\n${lines.join('\n')}`
+}
+
+function formatAttachmentSize(size: number | undefined): string {
+  if (!size) return 'unknown size'
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+function openAiChatAttachmentParts(attachment: ChatAttachment): Array<Record<string, unknown>> {
+  if (attachment.kind !== 'image') return []
+  return [
+    {
+      type: 'image_url',
+      image_url: {
+        url: attachment.dataUrl
+      }
+    }
+  ]
+}
+
+function openAiResponsesAttachmentParts(attachment: ChatAttachment): Array<Record<string, unknown>> {
+  if (attachment.kind === 'file') {
+    return [
+      {
+        type: 'input_file',
+        filename: attachment.name || `attachment.${attachment.mimeType.split('/')[1] || 'bin'}`,
+        file_data: attachment.dataUrl
+      }
+    ]
+  }
+
+  if (attachment.kind !== 'image') return []
+  return [
+    {
+      type: 'input_image',
+      image_url: attachment.dataUrl,
+      detail: 'auto'
+    }
+  ]
+}
+
+function anthropicAttachmentParts(attachment: ChatAttachment): Array<Record<string, unknown>> {
+  if (attachment.kind !== 'image') return []
+  const [header, data] = attachment.dataUrl.split(',')
+  const mediaType = header.match(/^data:([^;]+);base64$/)?.[1] || attachment.mimeType
+  if (!data) return []
+  return [
+    {
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: mediaType,
+        data
+      }
+    }
   ]
 }
 
@@ -288,6 +442,7 @@ function localFallbackPlan(
   workspaceSnapshot?: WorkspaceSnapshot
 ): PlannedResponse {
   const prompt = messages[messages.length - 1]?.content || ''
+  const latestAttachments = messages[messages.length - 1]?.attachments || []
   const normalized = prompt.toLowerCase()
   const wantsWord = /word|docx|文档|报告|合同|方案/.test(normalized)
   const wantsExcel = /excel|xlsx|表格|台账|清单|预算|数据/.test(normalized)
@@ -299,7 +454,10 @@ function localFallbackPlan(
 
   if (targets.length === 0 && !wantsWord && !wantsExcel && !wantsPpt && !wantsAll) {
     return {
-      reply: '先选择一个文档目录或目标文件，然后直接告诉我要怎么改就行。',
+      reply:
+        latestAttachments.length > 0
+          ? '我已收到附件。请再选择要处理的 Word、Excel 或 PPT 文件，或说明要把附件内容整理到哪个文档里。'
+          : '先选择一个文档目录或目标文件，然后直接告诉我要怎么改 Word、Excel 或 PPT。',
       actions: []
     }
   }

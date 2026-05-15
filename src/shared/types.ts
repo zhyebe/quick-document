@@ -4,6 +4,7 @@ export type OfficeKind = 'word' | 'excel' | 'powerpoint' | 'unknown'
 export type WorkflowStageId = 'select' | 'plan' | 'execute' | 'verify' | 'done'
 export type WorkflowStageStatus = 'idle' | 'active' | 'complete' | 'blocked'
 export type AiProvider = 'openai' | 'anthropic'
+export type AiWireApi = 'chat_completions' | 'responses' | 'anthropic_messages'
 
 export type OfficeActionType =
   | 'create_docx'
@@ -20,7 +21,17 @@ export interface ChatMessage {
   content: string
   createdAt: string
   targetFiles?: WorkspaceFile[]
+  attachments?: ChatAttachment[]
   actions?: ActionResult[]
+}
+
+export interface ChatAttachment {
+  id: string
+  kind: 'image' | 'file' | 'audio' | 'video'
+  name?: string
+  mimeType: string
+  dataUrl: string
+  size?: number
 }
 
 export interface WorkspaceFile {
@@ -57,6 +68,7 @@ export interface DocumentWorkflowRun {
 
 export interface AppSettings {
   provider: AiProvider
+  wireApi: AiWireApi
   baseUrl: string
   model: string
   workspacePath: string
@@ -68,6 +80,7 @@ export interface AppSettings {
 
 export interface SettingsPatch {
   provider?: AiProvider
+  wireApi?: AiWireApi
   baseUrl?: string
   model?: string
   workspacePath?: string
@@ -78,6 +91,7 @@ export interface SettingsPatch {
 
 export interface ExternalAiConfig {
   provider: AiProvider
+  wireApi?: AiWireApi
   baseUrl: string
   model: string
   apiKey: string
