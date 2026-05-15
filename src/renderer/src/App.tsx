@@ -66,6 +66,7 @@ export function App(): JSX.Element {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [installingDocling, setInstallingDocling] = useState(false)
   const [downloadingUpdate, setDownloadingUpdate] = useState(false)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -173,6 +174,18 @@ export function App(): JSX.Element {
       setError(formatRuntimeError(err))
     } finally {
       setDownloadingUpdate(false)
+    }
+  }
+
+  async function checkLatestUpdate(): Promise<void> {
+    setCheckingUpdate(true)
+    setError('')
+    try {
+      setUpdateStatus(await window.quickDocument.checkForUpdates())
+    } catch (err) {
+      setError(formatRuntimeError(err))
+    } finally {
+      setCheckingUpdate(false)
     }
   }
 
@@ -693,7 +706,12 @@ export function App(): JSX.Element {
       {settingsOpen && settings && (
         <SettingsPanel
           settings={settings}
+          updateStatus={updateStatus}
+          checkingUpdate={checkingUpdate}
+          downloadingUpdate={downloadingUpdate}
           onClose={() => setSettingsOpen(false)}
+          onCheckUpdate={checkLatestUpdate}
+          onDownloadUpdate={downloadLatestUpdate}
           onClearHistory={async () => {
             await window.quickDocument.clearChatHistory()
             setMessages([welcomeMessage])
@@ -944,12 +962,22 @@ function AttachmentPreview({ attachment }: { attachment: ChatAttachment }): JSX.
 
 function SettingsPanel({
   settings,
+  updateStatus,
+  checkingUpdate,
+  downloadingUpdate,
   onClose,
+  onCheckUpdate,
+  onDownloadUpdate,
   onClearHistory,
   onSaved
 }: {
   settings: AppSettings
+  updateStatus: UpdateStatus | null
+  checkingUpdate: boolean
+  downloadingUpdate: boolean
   onClose: () => void
+  onCheckUpdate: () => void | Promise<void>
+  onDownloadUpdate: () => void | Promise<void>
   onClearHistory: () => void | Promise<void>
   onSaved: (settings: AppSettings) => void | Promise<void>
 }): JSX.Element {
@@ -1021,117 +1049,142 @@ function SettingsPanel({
           </button>
         </header>
 
-        <div className="import-row">
-          <button type="button" onClick={importExternalSettings} disabled={saving}>
-            <KeyRound size={16} />
-            导入 cc-switch / Codex / Claude 配置
-          </button>
-          <span>
-            {importMessage ||
-              (settings.usesExternalApiConfig
-                ? `已自动读取：${settings.apiConfigSource}`
-                : settings.hasApiKey
-                  ? '当前使用手动配置'
-                  : '未检测到外部配置')}
-          </span>
-        </div>
+        <div className="settings-panel-body">
+          <div className="import-row">
+            <button type="button" onClick={importExternalSettings} disabled={saving}>
+              <KeyRound size={16} />
+              导入 cc-switch / Codex / Claude 配置
+            </button>
+            <span>
+              {importMessage ||
+                (settings.usesExternalApiConfig
+                  ? `已自动读取：${settings.apiConfigSource}`
+                  : settings.hasApiKey
+                    ? '当前使用手动配置'
+                    : '未检测到外部配置')}
+            </span>
+          </div>
 
-        <label>
-          <span>Provider</span>
-          <select
-            value={form.provider || settings.provider}
-            onChange={(event) =>
-              setForm((current) => ({
-                ...current,
-                provider: event.target.value as AiProvider
-              }))
-            }
-          >
-            <option value="openai">OpenAI-compatible</option>
-            <option value="anthropic">Anthropic-compatible</option>
-          </select>
-        </label>
-
-        <label>
-          <span>API 类型</span>
-          <select
-            value={form.wireApi || settings.wireApi}
-            onChange={(event) =>
-              setForm((current) => ({
-                ...current,
-                wireApi: event.target.value as SettingsPatch['wireApi']
-              }))
-            }
-          >
-            <option value="chat_completions">OpenAI Chat Completions</option>
-            <option value="responses">OpenAI Responses</option>
-            <option value="anthropic_messages">Anthropic Messages</option>
-          </select>
-        </label>
-
-        <label>
-          <span>API Base URL</span>
-          <input
-            value={form.baseUrl || ''}
-            onChange={(event) => setForm((current) => ({ ...current, baseUrl: event.target.value }))}
-            placeholder="https://api.openai.com/v1"
-          />
-        </label>
-
-        <label>
-          <span>Model</span>
-          <input
-            value={form.model || ''}
-            onChange={(event) => setForm((current) => ({ ...current, model: event.target.value }))}
-            placeholder="gpt-4.1-mini"
-          />
-        </label>
-
-        <label>
-          <span>API Key {settings.hasApiKey ? '（已保存，留空则不变）' : ''}</span>
-          <input
-            type="password"
-            value={form.apiKey || ''}
-            onChange={(event) => setForm((current) => ({ ...current, apiKey: event.target.value }))}
-            placeholder={settings.hasApiKey ? '输入新 Key 可替换' : 'sk-...'}
-          />
-        </label>
-
-        <label>
-          <span>文档目录</span>
-          <div className="path-row">
-            <input
-              value={form.workspacePath || ''}
+          <label>
+            <span>Provider</span>
+            <select
+              value={form.provider || settings.provider}
               onChange={(event) =>
-                setForm((current) => ({ ...current, workspacePath: event.target.value }))
+                setForm((current) => ({
+                  ...current,
+                  provider: event.target.value as AiProvider
+                }))
+              }
+            >
+              <option value="openai">OpenAI-compatible</option>
+              <option value="anthropic">Anthropic-compatible</option>
+            </select>
+          </label>
+
+          <label>
+            <span>API 类型</span>
+            <select
+              value={form.wireApi || settings.wireApi}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  wireApi: event.target.value as SettingsPatch['wireApi']
+                }))
+              }
+            >
+              <option value="chat_completions">OpenAI Chat Completions</option>
+              <option value="responses">OpenAI Responses</option>
+              <option value="anthropic_messages">Anthropic Messages</option>
+            </select>
+          </label>
+
+          <label>
+            <span>API Base URL</span>
+            <input
+              value={form.baseUrl || ''}
+              onChange={(event) => setForm((current) => ({ ...current, baseUrl: event.target.value }))}
+              placeholder="https://api.openai.com/v1"
+            />
+          </label>
+
+          <label>
+            <span>Model</span>
+            <input
+              value={form.model || ''}
+              onChange={(event) => setForm((current) => ({ ...current, model: event.target.value }))}
+              placeholder="gpt-4.1-mini"
+            />
+          </label>
+
+          <label>
+            <span>API Key {settings.hasApiKey ? '（已保存，留空则不变）' : ''}</span>
+            <input
+              type="password"
+              value={form.apiKey || ''}
+              onChange={(event) => setForm((current) => ({ ...current, apiKey: event.target.value }))}
+              placeholder={settings.hasApiKey ? '输入新 Key 可替换' : 'sk-...'}
+            />
+          </label>
+
+          <label>
+            <span>文档目录</span>
+            <div className="path-row">
+              <input
+                value={form.workspacePath || ''}
+                onChange={(event) =>
+                  setForm((current) => ({ ...current, workspacePath: event.target.value }))
+                }
+              />
+              <button type="button" onClick={chooseWorkspace}>
+                <FolderOpen size={16} />
+              </button>
+            </div>
+          </label>
+
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={Boolean(form.residentMode)}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, residentMode: event.target.checked }))
               }
             />
-            <button type="button" onClick={chooseWorkspace}>
-              <FolderOpen size={16} />
+            <span>关闭窗口后驻留在托盘</span>
+          </label>
+
+          <div className="cache-row">
+            <div>
+              <strong>聊天历史缓存</strong>
+              <span>当前已缓存 {settings.cachedMessageCount} 条消息。</span>
+            </div>
+            <button type="button" onClick={clearHistory} disabled={clearing || saving}>
+              {clearing ? <Loader2 className="spin" size={16} /> : <X size={16} />}
+              清除缓存
             </button>
           </div>
-        </label>
 
-        <label className="toggle-row">
-          <input
-            type="checkbox"
-            checked={Boolean(form.residentMode)}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, residentMode: event.target.checked }))
-            }
-          />
-          <span>关闭窗口后驻留在托盘</span>
-        </label>
-
-        <div className="cache-row">
-          <div>
-            <strong>聊天历史缓存</strong>
-            <span>当前已缓存 {settings.cachedMessageCount} 条消息。</span>
+          <div className="update-row">
+            <div>
+              <strong>版本更新</strong>
+              <span>
+                {updateStatus
+                  ? `${updateStatus.message}（当前 ${updateStatus.currentVersion}）`
+                  : '尚未检查更新。'}
+              </span>
+            </div>
+            <div className="update-row-actions">
+              <button type="button" onClick={onCheckUpdate} disabled={checkingUpdate || saving}>
+                {checkingUpdate ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+                检查更新
+              </button>
+              {updateStatus?.available && (
+                <button type="button" onClick={onDownloadUpdate} disabled={downloadingUpdate || saving}>
+                  {downloadingUpdate ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+                  下载并安装
+                </button>
+              )}
+            </div>
           </div>
-          <button type="button" onClick={clearHistory} disabled={clearing || saving}>
-            {clearing ? <Loader2 className="spin" size={16} /> : <X size={16} />}
-            清除缓存
-          </button>
         </div>
 
         <footer>
