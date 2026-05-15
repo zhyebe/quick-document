@@ -1,9 +1,8 @@
-import { app, shell } from 'electron'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { app, net, shell } from 'electron'
 import type { UpdateAsset, UpdateDownloadResult, UpdateStatus } from '@shared/types'
 
 const RELEASE_API_URL = 'https://api.github.com/repos/zhyebe/quick-document/releases/latest'
+const UPDATE_REQUEST_TIMEOUT_MS = 15_000
 
 interface GitHubRelease {
   tag_name?: string
@@ -19,7 +18,7 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
   const currentVersion = app.getVersion()
 
   try {
-    const response = await fetch(RELEASE_API_URL, {
+    const response = await fetchForUpdate(RELEASE_API_URL, {
       headers: {
         Accept: 'application/vnd.github+json',
         'User-Agent': `QuickDocument/${currentVersion}`
@@ -68,9 +67,9 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
   }
 }
 
-export async function downloadAndOpenUpdate(): Promise<UpdateDownloadResult> {
-  const status = await checkForUpdates()
-  if (!status.available || !status.asset) {
+export async function downloadAndOpenUpdate(cachedStatus?: UpdateStatus): Promise<UpdateDownloadResult> {
+  const status = cachedStatus?.asset ? cachedStatus : await checkForUpdates()
+  if (!status.asset) {
     return {
       ok: false,
       message: status.message,
@@ -78,39 +77,73 @@ export async function downloadAndOpenUpdate(): Promise<UpdateDownloadResult> {
     }
   }
 
+  return openUpdateInBrowser(
+    status,
+    `已在浏览器打开安装包下载页面：${status.asset.name}。下载完成后运行安装包完成更新。`
+  )
+}
+
+async function fetchForUpdate(url: string, init: RequestInit): Promise<Response> {
+  const requestInit: RequestInit = {
+    ...init,
+    redirect: 'follow'
+  }
   try {
-    const downloadDir = join(app.getPath('userData'), 'updates')
-    mkdirSync(downloadDir, { recursive: true })
-    const filePath = join(downloadDir, sanitizeFilename(status.asset.name))
-    const response = await fetch(status.asset.url, {
-      headers: {
-        'User-Agent': `QuickDocument/${status.currentVersion}`
-      }
-    })
+    return await fetchWithTimeout((signal) => net.fetch(url, { ...requestInit, signal }))
+  } catch (error) {
+    if (isAbortError(error)) throw error
+    return fetchWithTimeout((signal) => fetch(url, { ...requestInit, signal }))
+  }
+}
 
-    if (!response.ok) {
-      return {
-        ok: false,
-        message: `下载安装包失败：GitHub 返回 ${response.status}`,
-        releaseUrl: status.releaseUrl
-      }
-    }
-
-    writeFileSync(filePath, Buffer.from(await response.arrayBuffer()))
-    const openError = await shell.openPath(filePath)
+async function openUpdateInBrowser(status: UpdateStatus, message: string): Promise<UpdateDownloadResult> {
+  const target = status.asset?.url || status.releaseUrl
+  if (!target) {
     return {
-      ok: !openError,
-      message: openError ? `安装包已下载，但无法打开：${openError}` : `已下载并打开安装包：${status.asset.name}`,
-      filePath,
+      ok: false,
+      message,
+      releaseUrl: status.releaseUrl
+    }
+  }
+
+  try {
+    await shell.openExternal(target)
+    return {
+      ok: true,
+      message,
       releaseUrl: status.releaseUrl
     }
   } catch (error) {
     return {
       ok: false,
-      message: `下载安装包失败：${error instanceof Error ? error.message : String(error)}`,
+      message: `${message} 但浏览器打开失败：${formatUpdateError(error)}`,
       releaseUrl: status.releaseUrl
     }
   }
+}
+
+function formatUpdateError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
+async function fetchWithTimeout(fn: (signal: AbortSignal) => Promise<Response>): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), UPDATE_REQUEST_TIMEOUT_MS)
+  try {
+    return await fn(controller.signal)
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`请求超时（${Math.round(UPDATE_REQUEST_TIMEOUT_MS / 1000)}s）`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && /abort|aborted|timeout/i.test(error.message)
 }
 
 function selectInstallerAsset(assets: GitHubRelease['assets']): UpdateAsset | undefined {
@@ -155,8 +188,4 @@ function compareVersions(first: string, second: string): number {
 function numberPart(value: string): number {
   const parsed = Number(value.replace(/[^0-9].*$/, ''))
   return Number.isFinite(parsed) ? parsed : 0
-}
-
-function sanitizeFilename(value: string): string {
-  return value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').slice(0, 160)
 }

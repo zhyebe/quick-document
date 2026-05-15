@@ -25,6 +25,10 @@ import {
   DragEvent,
   FormEvent,
   KeyboardEvent,
+  PointerEvent,
+  TouchEvent,
+  UIEvent,
+  WheelEvent,
   useEffect,
   useMemo,
   useRef,
@@ -54,6 +58,17 @@ const welcomeMessage: ChatMessage = {
   content: '选择一个文档目录，然后直接告诉我要改哪个 Word、Excel 或 PPT。'
 }
 
+const AUTO_SCROLL_BOTTOM_THRESHOLD = 80
+const SCROLLBAR_HIT_WIDTH = 18
+
+function isNearBottom(element: HTMLElement): boolean {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= AUTO_SCROLL_BOTTOM_THRESHOLD
+}
+
+function hasScrollableOverflow(element: HTMLElement): boolean {
+  return element.scrollHeight > element.clientHeight + AUTO_SCROLL_BOTTOM_THRESHOLD
+}
+
 export function App(): JSX.Element {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [workspaceSnapshot, setWorkspaceSnapshot] = useState<WorkspaceSnapshot | null>(null)
@@ -70,12 +85,15 @@ export function App(): JSX.Element {
   const [busy, setBusy] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [error, setError] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
   const settingsRef = useRef<AppSettings | null>(null)
   const messagesRef = useRef<ChatMessage[]>([welcomeMessage])
+  const followOutputRef = useRef(true)
+  const programmaticScrollRef = useRef(false)
   const activeRequestIdRef = useRef<string | null>(null)
   const activeAssistantIdRef = useRef<string | null>(null)
   const runTokenRef = useRef(0)
@@ -107,7 +125,8 @@ export function App(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+    if (!followOutputRef.current) return
+    window.requestAnimationFrame(() => scrollMessagesToBottom('auto'))
   }, [messages, busy])
 
   useEffect(() => {
@@ -164,7 +183,7 @@ export function App(): JSX.Element {
     setDownloadingUpdate(true)
     setError('')
     try {
-      const result = await window.quickDocument.downloadUpdate()
+      const result = await window.quickDocument.downloadUpdate(updateStatus || undefined)
       if (!result.ok) {
         setError(result.message)
         return
@@ -256,6 +275,8 @@ export function App(): JSX.Element {
   }
 
   async function startChatRequest(requestMessages: ChatMessage[], requestId: string): Promise<void> {
+    followOutputRef.current = true
+    setShowScrollToBottom(false)
     const assistantDraft: ChatMessage = {
       id: `${requestId}-assistant`,
       role: 'assistant',
@@ -390,6 +411,59 @@ export function App(): JSX.Element {
       event.preventDefault()
       void submit()
     }
+  }
+
+  function onMessagesScroll(event: UIEvent<HTMLDivElement>): void {
+    const element = event.currentTarget
+    const nearBottom = isNearBottom(element)
+    if (nearBottom) {
+      followOutputRef.current = true
+      setShowScrollToBottom(false)
+      return
+    }
+
+    if (!programmaticScrollRef.current && !followOutputRef.current) {
+      setShowScrollToBottom(hasScrollableOverflow(element))
+    }
+  }
+
+  function onMessagesWheel(event: WheelEvent<HTMLDivElement>): void {
+    if (event.deltaY < 0 || !isNearBottom(event.currentTarget)) {
+      pauseOutputFollow(event.currentTarget)
+    }
+  }
+
+  function onMessagesPointerDown(event: PointerEvent<HTMLDivElement>): void {
+    const rect = event.currentTarget.getBoundingClientRect()
+    if (event.clientX >= rect.right - SCROLLBAR_HIT_WIDTH) {
+      pauseOutputFollow(event.currentTarget)
+    }
+  }
+
+  function onMessagesTouchStart(event: TouchEvent<HTMLDivElement>): void {
+    pauseOutputFollow(event.currentTarget)
+  }
+
+  function pauseOutputFollow(element: HTMLDivElement | null): void {
+    if (!element || !hasScrollableOverflow(element)) return
+    followOutputRef.current = false
+    setShowScrollToBottom(true)
+  }
+
+  function resumeOutputFollow(): void {
+    followOutputRef.current = true
+    setShowScrollToBottom(false)
+    scrollMessagesToBottom('smooth')
+  }
+
+  function scrollMessagesToBottom(behavior: ScrollBehavior): void {
+    const element = scrollRef.current
+    if (!element) return
+    programmaticScrollRef.current = true
+    element.scrollTo({ top: element.scrollHeight, behavior })
+    window.requestAnimationFrame(() => {
+      programmaticScrollRef.current = false
+    })
   }
 
   async function addFiles(files: FileList | File[] | null): Promise<void> {
@@ -592,11 +666,24 @@ export function App(): JSX.Element {
           </section>
 
           <section className="chat-panel">
-            <div className="messages" ref={scrollRef}>
+            <div
+              className="messages"
+              ref={scrollRef}
+              onPointerDown={onMessagesPointerDown}
+              onScroll={onMessagesScroll}
+              onTouchStart={onMessagesTouchStart}
+              onWheel={onMessagesWheel}
+            >
               {messages.map((message) => (
                 <MessageBubble key={message.id} message={message} />
               ))}
             </div>
+            {showScrollToBottom && (
+              <button className="scroll-bottom-button" type="button" onClick={resumeOutputFollow}>
+                <ChevronDown size={16} />
+                回到底部
+              </button>
+            )}
 
             {error && <div className="error-bar">{error}</div>}
 

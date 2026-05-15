@@ -42,7 +42,7 @@ const api = {
   openFile: (filePath: string): Promise<string> => ipcRenderer.invoke('files:open', filePath),
   revealFile: (filePath: string): Promise<void> => ipcRenderer.invoke('files:reveal', filePath),
   checkForUpdates: (): Promise<UpdateStatus> => ipcRenderer.invoke('updates:check'),
-  downloadUpdate: (): Promise<UpdateDownloadResult> => ipcRenderer.invoke('updates:download')
+  downloadUpdate: (status?: UpdateStatus): Promise<UpdateDownloadResult> => ipcRenderer.invoke('updates:download', status)
 }
 
 contextBridge.exposeInMainWorld('quickDocument', api)

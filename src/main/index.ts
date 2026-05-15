@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, 
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { ChatRequest, ChatResponse, ChatStreamEvent, WorkspaceSnapshot } from '@shared/types'
+import type { ChatRequest, ChatResponse, ChatStreamEvent, UpdateStatus, WorkspaceSnapshot } from '@shared/types'
 import { runDocumentAgent } from './services/documentAgent'
 import { buildDocumentPreviewContext } from './services/documentTextPreview'
 import { buildDoclingPreviewContext, getDoclingStatus, installDocling } from './services/doclingService'
@@ -245,7 +245,7 @@ function registerIpc(): void {
   ipcMain.handle('files:open', async (_event, filePath: string) => shell.openPath(filePath))
   ipcMain.handle('files:reveal', (_event, filePath: string) => shell.showItemInFolder(filePath))
   ipcMain.handle('updates:check', () => checkForUpdates())
-  ipcMain.handle('updates:download', () => downloadAndOpenUpdate())
+  ipcMain.handle('updates:download', (_event, status?: UpdateStatus) => downloadAndOpenUpdate(status))
 
   ipcMain.handle('chat:send', async (event, request: ChatRequest): Promise<ChatResponse> => {
     const requestId = request.requestId || `${Date.now()}-${Math.random().toString(16).slice(2)}`
