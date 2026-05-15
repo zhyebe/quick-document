@@ -232,3 +232,15 @@ export interface UpdateDownloadResult {
   filePath?: string
   releaseUrl?: string
 }
+
+export interface VoiceTranscriptionRequest {
+  dataUrl: string
+  mimeType: string
+  language?: string
+}
+
+export interface VoiceTranscriptionResult {
+  ok: boolean
+  text?: string
+  message: string
+}

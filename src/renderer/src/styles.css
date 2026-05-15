@@ -51,11 +51,15 @@ button {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding: 24px 18px;
   color: #f9fafb;
   background: #202124;
   border-right: 1px solid #151619;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 
 .brand-block {
@@ -223,6 +227,7 @@ button {
   height: 100%;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   -webkit-app-region: no-drag;
 }
 
@@ -279,10 +284,17 @@ button {
   background: #f1f3f5;
 }
 
+.voice-input-button.recording {
+  color: #b91c1c;
+  background: #fff1f2;
+  border-color: #fecdd3;
+}
+
 .workflow-layout {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
   gap: 18px;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   padding: 20px 32px 28px;
@@ -292,6 +304,7 @@ button {
 .file-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
   min-height: 0;
   background: #ffffff;
   border: 1px solid #dfe4ea;
@@ -831,7 +844,7 @@ button {
 
 .composer {
   display: grid;
-  grid-template-columns: 38px 38px minmax(0, 1fr) 38px;
+  grid-template-columns: 38px 38px 38px minmax(0, 1fr) 38px;
   align-items: end;
   gap: 10px;
   max-width: 860px;
@@ -845,7 +858,7 @@ button {
 }
 
 .composer.has-stop {
-  grid-template-columns: 38px 38px minmax(0, 1fr) 38px 38px;
+  grid-template-columns: 38px 38px 38px minmax(0, 1fr) 38px 38px;
 }
 
 .hidden-file-input {

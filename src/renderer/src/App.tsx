@@ -10,6 +10,7 @@ import {
   KeyRound,
   Loader2,
   MessageSquareText,
+  Mic,
   MonitorUp,
   Paperclip,
   Presentation,
@@ -84,6 +85,7 @@ export function App(): JSX.Element {
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [error, setError] = useState('')
@@ -94,6 +96,9 @@ export function App(): JSX.Element {
   const messagesRef = useRef<ChatMessage[]>([welcomeMessage])
   const followOutputRef = useRef(true)
   const programmaticScrollRef = useRef(false)
+  const voiceRecorderRef = useRef<MediaRecorder | null>(null)
+  const voiceStreamRef = useRef<MediaStream | null>(null)
+  const voiceChunksRef = useRef<BlobPart[]>([])
   const activeRequestIdRef = useRef<string | null>(null)
   const activeAssistantIdRef = useRef<string | null>(null)
   const runTokenRef = useRef(0)
@@ -466,6 +471,91 @@ export function App(): JSX.Element {
     })
   }
 
+  async function toggleVoiceInput(): Promise<void> {
+    if (voiceState === 'recording') {
+      stopVoiceRecording()
+      return
+    }
+    if (voiceState !== 'idle') return
+    await startVoiceRecording()
+  }
+
+  async function startVoiceRecording(): Promise<void> {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setError('当前系统暂不支持录音。请确认麦克风权限，或升级到新版系统组件。')
+      return
+    }
+
+    try {
+      setError('')
+      voiceChunksRef.current = []
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mimeType = preferredAudioMimeType()
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+      voiceStreamRef.current = stream
+      voiceRecorderRef.current = recorder
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) voiceChunksRef.current.push(event.data)
+      }
+      recorder.onstop = () => {
+        void finishVoiceRecording(recorder.mimeType || mimeType || 'audio/webm')
+      }
+      recorder.start()
+      setVoiceState('recording')
+    } catch (error) {
+      cleanupVoiceRecording()
+      setVoiceState('idle')
+      setError(`无法启动语音输入：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  function stopVoiceRecording(): void {
+    const recorder = voiceRecorderRef.current
+    if (!recorder || recorder.state === 'inactive') {
+      cleanupVoiceRecording()
+      setVoiceState('idle')
+      return
+    }
+    setVoiceState('transcribing')
+    recorder.stop()
+  }
+
+  async function finishVoiceRecording(mimeType: string): Promise<void> {
+    const blob = new Blob(voiceChunksRef.current, { type: mimeType })
+    cleanupVoiceRecording()
+    if (blob.size < 300) {
+      setVoiceState('idle')
+      setError('没有录到有效语音。')
+      return
+    }
+
+    try {
+      const result = await window.quickDocument.transcribeVoice({
+        dataUrl: await blobToDataUrl(blob),
+        mimeType: blob.type || mimeType || 'audio/webm',
+        language: 'zh'
+      })
+      if (!result.ok || !result.text) {
+        setError(result.message)
+        return
+      }
+      setInput((current) => appendTranscribedText(current, result.text || ''))
+      composerTextareaRef.current?.focus()
+    } catch (error) {
+      setError(`语音转文字失败：${formatRuntimeError(error)}`)
+    } finally {
+      setVoiceState('idle')
+    }
+  }
+
+  function cleanupVoiceRecording(): void {
+    voiceRecorderRef.current = null
+    voiceChunksRef.current = []
+    voiceStreamRef.current?.getTracks().forEach((track) => track.stop())
+    voiceStreamRef.current = null
+  }
+
   async function addFiles(files: FileList | File[] | null): Promise<void> {
     if (!files) return
     setError('')
@@ -750,6 +840,21 @@ export function App(): JSX.Element {
                 >
                   <Paperclip size={18} />
                 </button>
+                <button
+                  className={`tool-button voice-input-button ${voiceState === 'recording' ? 'recording' : ''}`}
+                  type="button"
+                  onClick={() => void toggleVoiceInput()}
+                  disabled={voiceState === 'transcribing'}
+                  title={
+                    voiceState === 'recording'
+                      ? '停止录音并转文字'
+                      : voiceState === 'transcribing'
+                        ? '正在转文字'
+                        : '语音输入'
+                  }
+                >
+                  {voiceState === 'transcribing' ? <Loader2 className="spin" size={18} /> : <Mic size={18} />}
+                </button>
                 <textarea
                   ref={composerTextareaRef}
                   value={input}
@@ -878,6 +983,32 @@ function formatRuntimeError(error: unknown): string {
     return 'AI 接口或代理暂时超时，当前没有修改任何文档。请稍后重试，或切换到可用的 cc-switch / OpenAI 代理配置。'
   }
   return message || '未知错误'
+}
+
+function preferredAudioMimeType(): string {
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus'
+  ]
+  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || ''
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(reader.error || new Error('读取录音失败。'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+function appendTranscribedText(current: string, text: string): string {
+  const next = text.trim()
+  if (!next) return current
+  if (!current.trim()) return next
+  return `${current.replace(/\s+$/, '')}\n${next}`
 }
 
 function MessageBubble({ message }: { message: ChatMessage }): JSX.Element {

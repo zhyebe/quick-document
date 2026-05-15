@@ -11,6 +11,8 @@ import type {
   SettingsPatch,
   UpdateDownloadResult,
   UpdateStatus,
+  VoiceTranscriptionRequest,
+  VoiceTranscriptionResult,
   WorkspaceSnapshot
 } from '@shared/types'
 
@@ -42,7 +44,9 @@ const api = {
   openFile: (filePath: string): Promise<string> => ipcRenderer.invoke('files:open', filePath),
   revealFile: (filePath: string): Promise<void> => ipcRenderer.invoke('files:reveal', filePath),
   checkForUpdates: (): Promise<UpdateStatus> => ipcRenderer.invoke('updates:check'),
-  downloadUpdate: (status?: UpdateStatus): Promise<UpdateDownloadResult> => ipcRenderer.invoke('updates:download', status)
+  downloadUpdate: (status?: UpdateStatus): Promise<UpdateDownloadResult> => ipcRenderer.invoke('updates:download', status),
+  transcribeVoice: (request: VoiceTranscriptionRequest): Promise<VoiceTranscriptionResult> =>
+    ipcRenderer.invoke('voice:transcribe', request)
 }
 
 contextBridge.exposeInMainWorld('quickDocument', api)

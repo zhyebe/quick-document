@@ -2,7 +2,14 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, 
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { ChatRequest, ChatResponse, ChatStreamEvent, UpdateStatus, WorkspaceSnapshot } from '@shared/types'
+import type {
+  ChatRequest,
+  ChatResponse,
+  ChatStreamEvent,
+  UpdateStatus,
+  VoiceTranscriptionRequest,
+  WorkspaceSnapshot
+} from '@shared/types'
 import { runDocumentAgent } from './services/documentAgent'
 import { buildDocumentPreviewContext } from './services/documentTextPreview'
 import { buildDoclingPreviewContext, getDoclingStatus, installDocling } from './services/doclingService'
@@ -10,6 +17,7 @@ import { loadExternalAiConfig } from './services/externalAiConfig'
 import { SettingsStore } from './services/settingsStore'
 import { getEmbeddedOfficeSkillBrief, getRelevantOfficeSkillContext } from './services/skillRegistry'
 import { checkForUpdates, downloadAndOpenUpdate } from './services/updateService'
+import { transcribeVoiceInput } from './services/voiceTranscription'
 import { scanWorkspace } from './services/workspaceFiles'
 
 let mainWindow: BrowserWindow | null = null
@@ -74,6 +82,7 @@ function createWindow(): BrowserWindow {
   logMain('createWindow:browserWindow-created')
   ensureWindowVisible(mainWindow)
   logMain('createWindow:window-visible-checked')
+  wirePermissionHandlers(mainWindow)
   wireWindowDiagnostics(mainWindow)
   logMain('createWindow:diagnostics-wired')
   showMainWindow()
@@ -131,6 +140,12 @@ function wireWindowDiagnostics(window: BrowserWindow): void {
   window.webContents.on('unresponsive', () => logMain('window:unresponsive'))
   window.webContents.on('console-message', (_event, level, message, line, sourceId) => {
     if (level >= 2) logMain(`renderer:console ${level} ${message} (${sourceId}:${line})`)
+  })
+}
+
+function wirePermissionHandlers(window: BrowserWindow): void {
+  window.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(permission === 'media')
   })
 }
 
@@ -246,6 +261,14 @@ function registerIpc(): void {
   ipcMain.handle('files:reveal', (_event, filePath: string) => shell.showItemInFolder(filePath))
   ipcMain.handle('updates:check', () => checkForUpdates())
   ipcMain.handle('updates:download', (_event, status?: UpdateStatus) => downloadAndOpenUpdate(status))
+  ipcMain.handle('voice:transcribe', (_event, request: VoiceTranscriptionRequest) => {
+    const publicSettings = settingsStore.getPublicSettings()
+    return transcribeVoiceInput(request, {
+      provider: publicSettings.provider,
+      baseUrl: publicSettings.baseUrl,
+      apiKey: settingsStore.getApiKey()
+    })
+  })
 
   ipcMain.handle('chat:send', async (event, request: ChatRequest): Promise<ChatResponse> => {
     const requestId = request.requestId || `${Date.now()}-${Math.random().toString(16).slice(2)}`
