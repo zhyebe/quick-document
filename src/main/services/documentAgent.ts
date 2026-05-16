@@ -560,7 +560,9 @@ ${input.documentPreviewContext}`
   const recent = input.messages.slice(-10).map((message) => ({
     role: message.role === 'assistant' ? ('assistant' as const) : ('user' as const),
     content: appendAttachmentContext(message.content, message.attachments),
-    attachments: message.attachments?.filter((attachment) => attachment.kind === 'image' || attachment.kind === 'file')
+    attachments: message.attachments?.filter((attachment) =>
+      attachment.kind === 'image' || attachment.kind === 'file' || attachment.kind === 'audio'
+    )
   }))
 
   return [
@@ -862,11 +864,19 @@ function appendAttachmentContext(content: string, attachments: ChatAttachment[] 
 }
 
 function openAiChatAttachmentParts(attachment: ChatAttachment): Array<Record<string, unknown>> {
-  if (attachment.kind !== 'image') return []
-  return [{ type: 'image_url', image_url: { url: attachment.dataUrl } }]
+  if (attachment.kind === 'image') return [{ type: 'image_url', image_url: { url: attachment.dataUrl } }]
+  if (attachment.kind === 'audio') {
+    const audio = audioAttachmentPayload(attachment)
+    return audio ? [{ type: 'input_audio', input_audio: audio }] : []
+  }
+  return []
 }
 
 function openAiResponsesAttachmentParts(attachment: ChatAttachment): Array<Record<string, unknown>> {
+  if (attachment.kind === 'audio') {
+    const audio = audioAttachmentPayload(attachment)
+    return audio ? [{ type: 'input_audio', input_audio: audio }] : []
+  }
   if (attachment.kind === 'file') {
     return [
       {
@@ -878,6 +888,22 @@ function openAiResponsesAttachmentParts(attachment: ChatAttachment): Array<Recor
   }
   if (attachment.kind !== 'image') return []
   return [{ type: 'input_image', image_url: attachment.dataUrl, detail: 'auto' }]
+}
+
+function audioAttachmentPayload(attachment: ChatAttachment): { data: string; format: string } | null {
+  const [, data = ''] = attachment.dataUrl.split(',')
+  if (!data) return null
+  return {
+    data,
+    format: audioInputFormat(attachment.mimeType, attachment.name)
+  }
+}
+
+function audioInputFormat(mimeType: string, name?: string): string {
+  const value = `${mimeType} ${name || ''}`
+  if (/wav|x-wav/i.test(value)) return 'wav'
+  if (/mpeg|mp3/i.test(value)) return 'mp3'
+  return 'wav'
 }
 
 function anthropicAttachmentParts(attachment: ChatAttachment): Array<Record<string, unknown>> {

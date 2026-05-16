@@ -10,6 +10,7 @@ interface TranscriptionSettings {
 const TRANSCRIPTION_TIMEOUT_MS = 60_000
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024
 const TRANSCRIPTION_MODELS = ['whisper-1', 'gpt-4o-mini-transcribe', 'gpt-4o-transcribe']
+const AUDIO_CHAT_MODELS = ['gpt-audio', 'gpt-4o-audio-preview']
 const DIRECT_AUDIO_PROMPT = '请把这段语音完整转写成文字。只返回转写文本，不要解释，不要添加标点以外的说明。如果听不清，请尽量按原话转写。'
 
 export async function transcribeVoiceInput(
@@ -39,19 +40,20 @@ export async function transcribeVoiceInput(
     }
 
     const errors: string[] = []
-    if (settings.model.trim()) {
+    for (const model of audioChatModelCandidates(settings.model)) {
       try {
-        const text = await callDirectAudioChat(audio, settings)
-        if (text.trim()) {
+        const text = await callDirectAudioChat(audio, { ...settings, model })
+        const transcription = normalizeTranscriptionText(text)
+        if (transcription) {
           return {
             ok: true,
-            text: text.trim(),
+            text: transcription,
             message: '语音已由当前 AI 模型转成文字。'
           }
         }
-        errors.push('当前模型没有返回文字。')
+        errors.push(`${model} 没有收到可识别的语音内容。`)
       } catch (error) {
-        errors.push(`当前模型音频输入失败：${error instanceof Error ? error.message : String(error)}`)
+        errors.push(`${model} 音频输入失败：${error instanceof Error ? error.message : String(error)}`)
       }
     }
 
@@ -164,6 +166,7 @@ async function callDirectAudioChatWithContent(
     body: JSON.stringify({
       model: settings.model,
       temperature: 0,
+      store: false,
       messages: [
         {
           role: 'system',
@@ -256,8 +259,28 @@ function audioInputFormat(mimeType: string): string {
   if (/wav|x-wav/i.test(mimeType)) return 'wav'
   if (/mpeg|mp3/i.test(mimeType)) return 'mp3'
   if (/flac/i.test(mimeType)) return 'flac'
-  if (/ogg|opus/i.test(mimeType)) return 'opus'
+  if (/ogg|opus/i.test(mimeType)) return 'mp3'
   return 'wav'
+}
+
+function audioChatModelCandidates(currentModel: string): string[] {
+  const candidates = [currentModel.trim(), ...AUDIO_CHAT_MODELS]
+    .filter(Boolean)
+    .filter((model, index, array) => array.indexOf(model) === index)
+  return candidates
+}
+
+function normalizeTranscriptionText(value: string): string {
+  const text = value
+    .trim()
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
+    .trim()
+  if (!text || isNoAudioReply(text)) return ''
+  return text
+}
+
+function isNoAudioReply(text: string): boolean {
+  return /未收到.*语音|没有收到.*语音|没.*收到.*音频|没有.*音频|无法.*(听到|访问|读取).*音频|no audio|did(?: not|n't) receive.*audio|cannot access.*audio|unable to access.*audio/i.test(text)
 }
 
 function textFromMessageContent(content: unknown): string {

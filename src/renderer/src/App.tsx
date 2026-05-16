@@ -85,7 +85,7 @@ export function App(): JSX.Element {
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stopping, setStopping] = useState(false)
-  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
+  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'attaching'>('idle')
   const [voiceLevel, setVoiceLevel] = useState(0)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
@@ -528,7 +528,7 @@ export function App(): JSX.Element {
       setVoiceState('idle')
       return
     }
-    setVoiceState('transcribing')
+    setVoiceState('attaching')
     recorder.stop()
   }
 
@@ -542,20 +542,12 @@ export function App(): JSX.Element {
     }
 
     try {
-      const transcriptionBlob = await prepareVoiceTranscriptionBlob(blob)
-      const result = await window.quickDocument.transcribeVoice({
-        dataUrl: await blobToDataUrl(transcriptionBlob),
-        mimeType: transcriptionBlob.type || blob.type || mimeType || 'audio/webm',
-        language: 'zh'
-      })
-      if (!result.ok || !result.text) {
-        setError(result.message)
-        return
-      }
-      setInput((current) => appendTranscribedText(current, result.text || ''))
+      const audioBlob = await prepareVoiceAttachmentBlob(blob)
+      const attachment = await audioBlobToAttachment(audioBlob, mimeType)
+      setAttachments((current) => [...current, attachment])
       composerTextareaRef.current?.focus()
     } catch (error) {
-      setError(`语音转文字失败：${formatRuntimeError(error)}`)
+      setError(`语音输入失败：${formatRuntimeError(error)}`)
     } finally {
       setVoiceState('idle')
     }
@@ -914,16 +906,16 @@ export function App(): JSX.Element {
                   className={`tool-button voice-input-button ${voiceState === 'recording' ? 'recording' : ''}`}
                   type="button"
                   onClick={() => void toggleVoiceInput()}
-                  disabled={voiceState === 'transcribing'}
+                  disabled={voiceState === 'attaching'}
                   title={
                     voiceState === 'recording'
-                      ? '停止录音并转文字'
-                      : voiceState === 'transcribing'
-                        ? '正在转文字'
+                      ? '停止录音并加入语音附件'
+                      : voiceState === 'attaching'
+                        ? '正在加入语音附件'
                         : '语音输入'
                   }
                 >
-                  {voiceState === 'transcribing' ? (
+                  {voiceState === 'attaching' ? (
                     <Loader2 className="spin" size={18} />
                   ) : voiceState === 'recording' ? (
                     <span className="voice-wave" aria-hidden="true">
@@ -1092,7 +1084,7 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   })
 }
 
-async function prepareVoiceTranscriptionBlob(blob: Blob): Promise<Blob> {
+async function prepareVoiceAttachmentBlob(blob: Blob): Promise<Blob> {
   if (/audio\/(wav|x-wav)/i.test(blob.type)) return blob
   try {
     return await convertAudioBlobToWav(blob)
@@ -1159,11 +1151,17 @@ function writeAscii(view: DataView, offset: number, value: string): void {
   }
 }
 
-function appendTranscribedText(current: string, text: string): string {
-  const next = text.trim()
-  if (!next) return current
-  if (!current.trim()) return next
-  return `${current.replace(/\s+$/, '')}\n${next}`
+async function audioBlobToAttachment(blob: Blob, fallbackMimeType: string): Promise<ChatAttachment> {
+  const mimeType = blob.type || fallbackMimeType || 'audio/wav'
+  const extension = /wav|x-wav/i.test(mimeType) ? 'wav' : /mpeg|mp3/i.test(mimeType) ? 'mp3' : 'webm'
+  return {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    kind: 'audio',
+    name: `voice-input-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`,
+    mimeType,
+    dataUrl: await blobToDataUrl(blob),
+    size: blob.size
+  }
 }
 
 function MessageBubble({ message }: { message: ChatMessage }): JSX.Element {
