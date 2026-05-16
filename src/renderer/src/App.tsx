@@ -86,6 +86,7 @@ export function App(): JSX.Element {
   const [busy, setBusy] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
+  const [voiceLevel, setVoiceLevel] = useState(0)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [error, setError] = useState('')
@@ -99,6 +100,9 @@ export function App(): JSX.Element {
   const voiceRecorderRef = useRef<MediaRecorder | null>(null)
   const voiceStreamRef = useRef<MediaStream | null>(null)
   const voiceChunksRef = useRef<BlobPart[]>([])
+  const voiceAudioContextRef = useRef<AudioContext | null>(null)
+  const voiceAnalyserRef = useRef<AnalyserNode | null>(null)
+  const voiceAnimationFrameRef = useRef<number | null>(null)
   const activeRequestIdRef = useRef<string | null>(null)
   const activeAssistantIdRef = useRef<string | null>(null)
   const runTokenRef = useRef(0)
@@ -500,6 +504,7 @@ export function App(): JSX.Element {
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
       voiceStreamRef.current = stream
       voiceRecorderRef.current = recorder
+      startVoiceLevelMeter(stream)
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) voiceChunksRef.current.push(event.data)
@@ -537,9 +542,10 @@ export function App(): JSX.Element {
     }
 
     try {
+      const transcriptionBlob = await prepareVoiceTranscriptionBlob(blob)
       const result = await window.quickDocument.transcribeVoice({
-        dataUrl: await blobToDataUrl(blob),
-        mimeType: blob.type || mimeType || 'audio/webm',
+        dataUrl: await blobToDataUrl(transcriptionBlob),
+        mimeType: transcriptionBlob.type || blob.type || mimeType || 'audio/webm',
         language: 'zh'
       })
       if (!result.ok || !result.text) {
@@ -558,8 +564,57 @@ export function App(): JSX.Element {
   function cleanupVoiceRecording(): void {
     voiceRecorderRef.current = null
     voiceChunksRef.current = []
+    stopVoiceLevelMeter()
     voiceStreamRef.current?.getTracks().forEach((track) => track.stop())
     voiceStreamRef.current = null
+  }
+
+  function startVoiceLevelMeter(stream: MediaStream): void {
+    stopVoiceLevelMeter()
+    const AudioContextCtor =
+      window.AudioContext ||
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!AudioContextCtor) return
+
+    try {
+      const context = new AudioContextCtor()
+      const analyser = context.createAnalyser()
+      analyser.fftSize = 512
+      analyser.smoothingTimeConstant = 0.72
+      context.createMediaStreamSource(stream).connect(analyser)
+      voiceAudioContextRef.current = context
+      voiceAnalyserRef.current = analyser
+      const samples = new Uint8Array(analyser.fftSize)
+
+      const tick = (): void => {
+        const currentAnalyser = voiceAnalyserRef.current
+        if (!currentAnalyser) return
+        currentAnalyser.getByteTimeDomainData(samples)
+        let sum = 0
+        for (const sample of samples) {
+          const centered = (sample - 128) / 128
+          sum += centered * centered
+        }
+        const rms = Math.sqrt(sum / samples.length)
+        setVoiceLevel(Math.min(1, Math.max(0.04, rms * 5.5)))
+        voiceAnimationFrameRef.current = window.requestAnimationFrame(tick)
+      }
+      tick()
+    } catch {
+      setVoiceLevel(0.18)
+    }
+  }
+
+  function stopVoiceLevelMeter(): void {
+    if (voiceAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(voiceAnimationFrameRef.current)
+      voiceAnimationFrameRef.current = null
+    }
+    voiceAnalyserRef.current = null
+    const context = voiceAudioContextRef.current
+    voiceAudioContextRef.current = null
+    void context?.close().catch(() => undefined)
+    setVoiceLevel(0)
   }
 
   async function addFiles(files: FileList | File[] | null): Promise<void> {
@@ -868,7 +923,22 @@ export function App(): JSX.Element {
                         : '语音输入'
                   }
                 >
-                  {voiceState === 'transcribing' ? <Loader2 className="spin" size={18} /> : <Mic size={18} />}
+                  {voiceState === 'transcribing' ? (
+                    <Loader2 className="spin" size={18} />
+                  ) : voiceState === 'recording' ? (
+                    <span className="voice-wave" aria-hidden="true">
+                      {[0.65, 0.9, 1.15, 0.8].map((weight, index) => (
+                        <i
+                          key={weight}
+                          style={{
+                            transform: `scaleY(${Math.max(0.22, Math.min(1, voiceLevel * weight + 0.18))})`
+                          }}
+                        />
+                      ))}
+                    </span>
+                  ) : (
+                    <Mic size={18} />
+                  )}
                 </button>
                 <textarea
                   ref={composerTextareaRef}
@@ -1020,6 +1090,73 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     reader.onerror = () => reject(reader.error || new Error('读取录音失败。'))
     reader.readAsDataURL(blob)
   })
+}
+
+async function prepareVoiceTranscriptionBlob(blob: Blob): Promise<Blob> {
+  if (/audio\/(wav|x-wav)/i.test(blob.type)) return blob
+  try {
+    return await convertAudioBlobToWav(blob)
+  } catch {
+    return blob
+  }
+}
+
+async function convertAudioBlobToWav(blob: Blob): Promise<Blob> {
+  const AudioContextCtor =
+    window.AudioContext ||
+    (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+  if (!AudioContextCtor) throw new Error('当前系统不支持音频转换。')
+
+  const context = new AudioContextCtor()
+  try {
+    const buffer = await context.decodeAudioData(await blob.arrayBuffer())
+    return audioBufferToWavBlob(buffer)
+  } finally {
+    await context.close().catch(() => undefined)
+  }
+}
+
+function audioBufferToWavBlob(buffer: AudioBuffer): Blob {
+  const channelCount = Math.min(buffer.numberOfChannels || 1, 2)
+  const sampleRate = buffer.sampleRate
+  const frameCount = buffer.length
+  const blockAlign = channelCount * 2
+  const byteRate = sampleRate * blockAlign
+  const dataSize = frameCount * blockAlign
+  const bytes = new ArrayBuffer(44 + dataSize)
+  const view = new DataView(bytes)
+
+  writeAscii(view, 0, 'RIFF')
+  view.setUint32(4, 36 + dataSize, true)
+  writeAscii(view, 8, 'WAVE')
+  writeAscii(view, 12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, channelCount, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, byteRate, true)
+  view.setUint16(32, blockAlign, true)
+  view.setUint16(34, 16, true)
+  writeAscii(view, 36, 'data')
+  view.setUint32(40, dataSize, true)
+
+  const channelData = Array.from({ length: channelCount }, (_value, index) => buffer.getChannelData(index))
+  let offset = 44
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    for (let channel = 0; channel < channelCount; channel += 1) {
+      const sample = Math.max(-1, Math.min(1, channelData[channel][frame] || 0))
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
+      offset += 2
+    }
+  }
+
+  return new Blob([bytes], { type: 'audio/wav' })
+}
+
+function writeAscii(view: DataView, offset: number, value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint8(offset + index, value.charCodeAt(index))
+  }
 }
 
 function appendTranscribedText(current: string, text: string): string {

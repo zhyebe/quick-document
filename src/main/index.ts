@@ -266,6 +266,7 @@ function registerIpc(): void {
     return transcribeVoiceInput(request, {
       provider: publicSettings.provider,
       baseUrl: publicSettings.baseUrl,
+      model: publicSettings.model,
       apiKey: settingsStore.getApiKey()
     })
   })

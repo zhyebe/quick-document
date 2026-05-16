@@ -3,12 +3,14 @@ import type { AiProvider, VoiceTranscriptionRequest, VoiceTranscriptionResult } 
 interface TranscriptionSettings {
   provider: AiProvider
   baseUrl: string
+  model: string
   apiKey: string
 }
 
 const TRANSCRIPTION_TIMEOUT_MS = 60_000
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024
 const TRANSCRIPTION_MODELS = ['whisper-1', 'gpt-4o-mini-transcribe', 'gpt-4o-transcribe']
+const DIRECT_AUDIO_PROMPT = '请把这段语音完整转写成文字。只返回转写文本，不要解释，不要添加标点以外的说明。如果听不清，请尽量按原话转写。'
 
 export async function transcribeVoiceInput(
   request: VoiceTranscriptionRequest,
@@ -36,7 +38,23 @@ export async function transcribeVoiceInput(
       }
     }
 
-    let lastError = ''
+    const errors: string[] = []
+    if (settings.model.trim()) {
+      try {
+        const text = await callDirectAudioChat(audio, settings)
+        if (text.trim()) {
+          return {
+            ok: true,
+            text: text.trim(),
+            message: '语音已由当前 AI 模型转成文字。'
+          }
+        }
+        errors.push('当前模型没有返回文字。')
+      } catch (error) {
+        errors.push(`当前模型音频输入失败：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+
     for (const model of TRANSCRIPTION_MODELS) {
       try {
         const text = await callTranscriptionApi(audio, request.language || 'zh', model, settings)
@@ -47,15 +65,15 @@ export async function transcribeVoiceInput(
             message: '语音已转成文字。'
           }
         }
-        lastError = '接口没有返回文字。'
+        errors.push(`${model} 接口没有返回文字。`)
       } catch (error) {
-        lastError = error instanceof Error ? error.message : String(error)
+        errors.push(`${model}：${error instanceof Error ? error.message : String(error)}`)
       }
     }
 
     return {
       ok: false,
-      message: `语音转文字失败：${lastError || '未知错误'}`
+      message: `语音转文字失败：${errors.slice(-3).join('；') || '未知错误'}`
     }
   } catch (error) {
     return {
@@ -66,7 +84,7 @@ export async function transcribeVoiceInput(
 }
 
 async function callTranscriptionApi(
-  audio: { bytes: Uint8Array; mimeType: string; filename: string },
+  audio: AudioPayload,
   language: string,
   model: string,
   settings: TranscriptionSettings
@@ -98,6 +116,76 @@ async function callTranscriptionApi(
   return response.text()
 }
 
+async function callDirectAudioChat(audio: AudioPayload, settings: TranscriptionSettings): Promise<string> {
+  const audioErrorMessages: string[] = []
+  try {
+    return await callDirectAudioChatWithContent(settings, [
+      { type: 'text', text: DIRECT_AUDIO_PROMPT },
+      {
+        type: 'input_audio',
+        input_audio: {
+          data: audio.base64,
+          format: audioInputFormat(audio.mimeType)
+        }
+      }
+    ])
+  } catch (error) {
+    audioErrorMessages.push(error instanceof Error ? error.message : String(error))
+  }
+
+  try {
+    return await callDirectAudioChatWithContent(settings, [
+      { type: 'text', text: DIRECT_AUDIO_PROMPT },
+      {
+        type: 'file',
+        file: {
+          filename: audio.filename,
+          file_data: audio.dataUrl
+        }
+      }
+    ])
+  } catch (error) {
+    audioErrorMessages.push(error instanceof Error ? error.message : String(error))
+  }
+
+  throw new Error(audioErrorMessages.join('；') || '当前模型不支持音频输入。')
+}
+
+async function callDirectAudioChatWithContent(
+  settings: TranscriptionSettings,
+  content: Array<Record<string, unknown>>
+): Promise<string> {
+  const response = await fetchWithTimeout(`${settings.baseUrl.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${settings.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: settings.model,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content: '你是一个语音转文字助手，只输出转写文本。'
+        },
+        {
+          role: 'user',
+          content
+        }
+      ]
+    })
+  })
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(`当前模型返回 ${response.status}${detail ? `：${sanitizeRemoteError(detail)}` : ''}`)
+  }
+
+  const data = (await response.json()) as { choices?: Array<{ message?: { content?: unknown } }> }
+  return textFromMessageContent(data.choices?.[0]?.message?.content)
+}
+
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TRANSCRIPTION_TIMEOUT_MS)
@@ -116,14 +204,24 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
   }
 }
 
-function audioFromDataUrl(dataUrl: string, mimeType: string): { bytes: Uint8Array; mimeType: string; filename: string } {
+interface AudioPayload {
+  bytes: Uint8Array
+  mimeType: string
+  filename: string
+  base64: string
+  dataUrl: string
+}
+
+function audioFromDataUrl(dataUrl: string, mimeType: string): AudioPayload {
   const parsed = parseAudioDataUrl(dataUrl, mimeType)
   const bytes = Uint8Array.from(Buffer.from(parsed.base64, 'base64'))
   if (bytes.byteLength === 0) throw new Error('录音数据为空。')
   return {
     bytes,
     mimeType: parsed.mimeType,
-    filename: `voice-input.${audioExtension(parsed.mimeType)}`
+    filename: `voice-input.${audioExtension(parsed.mimeType)}`,
+    base64: parsed.base64,
+    dataUrl
   }
 }
 
@@ -152,6 +250,26 @@ function audioExtension(mimeType: string): string {
   if (/ogg/i.test(mimeType)) return 'ogg'
   if (/wav/i.test(mimeType)) return 'wav'
   return 'webm'
+}
+
+function audioInputFormat(mimeType: string): string {
+  if (/wav|x-wav/i.test(mimeType)) return 'wav'
+  if (/mpeg|mp3/i.test(mimeType)) return 'mp3'
+  if (/flac/i.test(mimeType)) return 'flac'
+  if (/ogg|opus/i.test(mimeType)) return 'opus'
+  return 'wav'
+}
+
+function textFromMessageContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((part) => {
+      if (!part || typeof part !== 'object') return ''
+      const record = part as Record<string, unknown>
+      return typeof record.text === 'string' ? record.text : ''
+    })
+    .join('')
 }
 
 function sanitizeRemoteError(text: string): string {

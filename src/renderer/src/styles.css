@@ -313,6 +313,25 @@ button {
   pointer-events: none;
 }
 
+.voice-wave {
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  width: 18px;
+  height: 14px;
+  line-height: 0;
+}
+
+.voice-wave i {
+  flex: 1 1 0;
+  height: 100%;
+  background: currentColor;
+  border-radius: 999px;
+  transform-origin: center bottom;
+  transition: transform 70ms linear;
+}
+
 .workflow-layout {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
