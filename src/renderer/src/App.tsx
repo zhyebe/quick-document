@@ -642,11 +642,11 @@ export function App(): JSX.Element {
                   className="mini-action"
                   type="button"
                   onClick={() => void downloadLatestUpdate()}
-                  disabled={downloadingUpdate}
-                >
-                  {downloadingUpdate ? <Loader2 className="spin" size={14} /> : <Download size={14} />}
-                  打开更新页
-                </button>
+                disabled={downloadingUpdate}
+              >
+                {downloadingUpdate ? <Loader2 className="spin" size={14} /> : <Download size={14} />}
+                下载更新
+              </button>
               </div>
             )}
           </section>
@@ -1400,7 +1400,7 @@ function SettingsPanel({
               {updateStatus?.available && (
                 <button type="button" onClick={onDownloadUpdate} disabled={downloadingUpdate || saving}>
                   {downloadingUpdate ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
-                  打开更新页
+                  下载并运行更新
                 </button>
               )}
             </div>

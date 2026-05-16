@@ -1,9 +1,13 @@
 import { app, net, shell } from 'electron'
+import { spawn } from 'node:child_process'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { UpdateAsset, UpdateDownloadResult, UpdateStatus } from '@shared/types'
 
 const RELEASE_API_URL = 'https://api.github.com/repos/zhyebe/quick-document/releases/latest'
 const RELEASE_PAGE_URL = 'https://github.com/zhyebe/quick-document/releases/latest'
 const UPDATE_REQUEST_TIMEOUT_MS = 15_000
+const INSTALLER_DOWNLOAD_TIMEOUT_MS = 10 * 60_000
 
 interface GitHubRelease {
   tag_name?: string
@@ -30,7 +34,7 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
       message: available
         ? release.asset
           ? `发现新版本 v${release.latestVersion}`
-          : `发现新版本 v${release.latestVersion}，请打开发布页下载对应安装包。`
+          : `发现新版本 v${release.latestVersion}，但没有匹配当前系统的安装包。`
         : release.asset
           ? `当前已是最新版本 v${currentVersion}`
           : '当前已是最新版本，且发布页上暂时没有匹配当前系统的安装包。'
@@ -46,7 +50,32 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
 
 export async function downloadAndOpenUpdate(cachedStatus?: UpdateStatus): Promise<UpdateDownloadResult> {
   const status = cachedStatus?.asset ? cachedStatus : await checkForUpdates()
-  return openUpdateInBrowser(status, buildOpenUpdateMessage(status))
+  if (!status.asset) {
+    return {
+      ok: false,
+      message: status.available
+        ? '发现新版本，但没有匹配当前系统的安装包，无法自动更新。'
+        : status.message,
+      releaseUrl: status.releaseUrl
+    }
+  }
+
+  try {
+    const filePath = await downloadInstaller(status.asset)
+    await openInstaller(filePath)
+    return {
+      ok: true,
+      filePath,
+      releaseUrl: status.releaseUrl,
+      message: buildInstallerOpenedMessage(status.asset, filePath)
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      releaseUrl: status.releaseUrl,
+      message: `下载安装包失败：${formatUpdateError(error)}`
+    }
+  }
 }
 
 async function fetchForUpdate(url: string, init: RequestInit): Promise<Response> {
@@ -60,39 +89,6 @@ async function fetchForUpdate(url: string, init: RequestInit): Promise<Response>
     if (isAbortError(error)) throw error
     return fetchWithTimeout((signal) => fetch(url, { ...requestInit, signal }))
   }
-}
-
-async function openUpdateInBrowser(status: UpdateStatus, message: string): Promise<UpdateDownloadResult> {
-  const target = status.asset?.url || status.releaseUrl || RELEASE_PAGE_URL
-  if (!target) {
-    return {
-      ok: false,
-      message,
-      releaseUrl: status.releaseUrl
-    }
-  }
-
-  try {
-    await shell.openExternal(target)
-    return {
-      ok: true,
-      message,
-      releaseUrl: status.releaseUrl
-    }
-  } catch (error) {
-    return {
-      ok: false,
-      message: `${message} 但浏览器打开失败：${formatUpdateError(error)}`,
-      releaseUrl: status.releaseUrl
-    }
-  }
-}
-
-function buildOpenUpdateMessage(status: UpdateStatus): string {
-  if (status.asset) {
-    return `已在浏览器打开安装包下载页面：${status.asset.name}。下载完成后运行安装包完成更新。`
-  }
-  return '已在浏览器打开发布页，请下载对应平台的安装包并手动安装。'
 }
 
 async function fetchLatestReleaseInfo(currentVersion: string): Promise<{
@@ -144,13 +140,82 @@ async function fetchReleasePageInfo(currentVersion: string): Promise<{
 
   if (!response.ok) return null
   const releaseUrl = response.url || RELEASE_PAGE_URL
-  const latestVersion = extractVersionFromReleaseUrl(releaseUrl)
+  const html = await response.text()
+  const latestVersion = extractVersionFromReleaseUrl(releaseUrl) || extractVersionFromReleaseHtml(html)
   if (!latestVersion) return null
   return {
     latestVersion,
     releaseUrl,
-    asset: undefined
+    asset: selectInstallerAsset(extractAssetsFromReleaseHtml(html))
   }
+}
+
+async function downloadInstaller(asset: UpdateAsset): Promise<string> {
+  const targetDir = join(app.getPath('downloads'), 'Quick Document Updates')
+  mkdirSync(targetDir, { recursive: true })
+  const filePath = join(targetDir, sanitizeFileName(asset.name))
+  const response = await fetchInstaller(asset.url)
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(`GitHub 返回 ${response.status}${detail ? `：${detail.slice(0, 180)}` : ''}`)
+  }
+
+  const bytes = Buffer.from(await response.arrayBuffer())
+  if (asset.size && bytes.length < asset.size) {
+    throw new Error(`安装包下载不完整：${bytes.length}/${asset.size} bytes`)
+  }
+  writeFileSync(filePath, bytes)
+  return filePath
+}
+
+async function fetchInstaller(url: string): Promise<Response> {
+  const requestInit: RequestInit = {
+    redirect: 'follow',
+    headers: {
+      Accept: 'application/octet-stream',
+      'User-Agent': `QuickDocument/${app.getVersion()}`
+    }
+  }
+  try {
+    return await fetchWithTimeout(
+      (signal) => net.fetch(url, { ...requestInit, signal }),
+      INSTALLER_DOWNLOAD_TIMEOUT_MS
+    )
+  } catch (error) {
+    if (isAbortError(error)) throw error
+    return fetchWithTimeout(
+      (signal) => fetch(url, { ...requestInit, signal }),
+      INSTALLER_DOWNLOAD_TIMEOUT_MS
+    )
+  }
+}
+
+async function openInstaller(filePath: string): Promise<void> {
+  if (process.platform === 'win32') {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(filePath, [], {
+        detached: true,
+        stdio: 'ignore'
+      })
+      child.once('error', reject)
+      child.unref()
+      resolve()
+    })
+    return
+  }
+
+  const error = await shell.openPath(filePath)
+  if (error) throw new Error(error)
+}
+
+function buildInstallerOpenedMessage(asset: UpdateAsset, filePath: string): string {
+  if (process.platform === 'win32') {
+    return `已下载并启动安装器：${asset.name}。如果安装器提示文件占用，请退出 Quick Document 后继续安装。`
+  }
+  if (process.platform === 'darwin') {
+    return `已下载并打开安装包：${asset.name}。下载位置：${filePath}`
+  }
+  return `已下载安装包：${filePath}`
 }
 
 function formatUpdateError(error: unknown): string {
@@ -158,14 +223,17 @@ function formatUpdateError(error: unknown): string {
   return String(error)
 }
 
-async function fetchWithTimeout(fn: (signal: AbortSignal) => Promise<Response>): Promise<Response> {
+async function fetchWithTimeout(
+  fn: (signal: AbortSignal) => Promise<Response>,
+  timeoutMs = UPDATE_REQUEST_TIMEOUT_MS
+): Promise<Response> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), UPDATE_REQUEST_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fn(controller.signal)
   } catch (error) {
     if (isAbortError(error)) {
-      throw new Error(`请求超时（${Math.round(UPDATE_REQUEST_TIMEOUT_MS / 1000)}s）`)
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}s）`)
     }
     throw error
   } finally {
@@ -208,6 +276,36 @@ function normalizeVersion(value: string): string {
 function extractVersionFromReleaseUrl(url: string): string {
   const match = url.match(/\/releases\/tag\/v?([^/?#]+)/i)
   return match ? normalizeVersion(match[1] || '') : ''
+}
+
+function extractVersionFromReleaseHtml(html: string): string {
+  const match = html.match(/\/zhyebe\/quick-document\/releases\/tag\/v?([0-9][^"'<>/]*)/i)
+  return match ? normalizeVersion(match[1] || '') : ''
+}
+
+function extractAssetsFromReleaseHtml(html: string): GitHubRelease['assets'] {
+  const assets = new Map<string, { name: string; browser_download_url: string }>()
+  const pattern = /href=["']([^"']*\/zhyebe\/quick-document\/releases\/download\/v[^"']+\.(?:dmg|exe|zip))["']/gi
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(html))) {
+    const url = absoluteGithubUrl(decodeHtml(match[1] || ''))
+    const name = decodeURIComponent(url.split('/').pop() || '')
+    if (name) assets.set(url, { name, browser_download_url: url })
+  }
+  return Array.from(assets.values())
+}
+
+function absoluteGithubUrl(value: string): string {
+  if (/^https?:\/\//i.test(value)) return value
+  return `https://github.com${value.startsWith('/') ? '' : '/'}${value}`
+}
+
+function decodeHtml(value: string): string {
+  return value.replace(/&amp;/g, '&')
+}
+
+function sanitizeFileName(value: string): string {
+  return value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() || 'Quick.Document.Update'
 }
 
 function compareVersions(first: string, second: string): number {
