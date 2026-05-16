@@ -145,6 +145,12 @@ export function App(): JSX.Element {
     textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden'
   }, [input])
 
+  useEffect(() => {
+    if (!error) return
+    const timer = window.setTimeout(() => setError(''), 9000)
+    return () => window.clearTimeout(timer)
+  }, [error])
+
   const statusText = useMemo(() => {
     if (!settings) return '正在加载'
     if (settings.hasApiKey) {
@@ -777,7 +783,14 @@ export function App(): JSX.Element {
               </button>
             )}
 
-            {error && <div className="error-bar">{error}</div>}
+            {error && (
+              <div className="error-bar" role="status">
+                <span>{error}</span>
+                <button type="button" onClick={() => setError('')} title="关闭提示">
+                  <X size={14} />
+                </button>
+              </div>
+            )}
 
             <div className="composer-dock">
               {targetFiles.length > 0 && (
@@ -815,7 +828,7 @@ export function App(): JSX.Element {
               )}
 
               <form
-                className={`composer ${busy ? 'has-stop' : ''}`}
+                className={`composer ${busy ? 'has-stop' : ''} ${voiceState === 'recording' ? 'voice-recording' : ''}`}
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={onDrop}
                 onSubmit={submit}
@@ -860,7 +873,10 @@ export function App(): JSX.Element {
                 <textarea
                   ref={composerTextareaRef}
                   value={input}
-                  onChange={(event) => setInput(event.target.value)}
+                  onChange={(event) => {
+                    setInput(event.target.value)
+                    if (error) setError('')
+                  }}
                   onKeyDown={onComposerKeyDown}
                   onPaste={(event) => {
                     void onPaste(event)

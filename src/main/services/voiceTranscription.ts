@@ -117,14 +117,32 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
 }
 
 function audioFromDataUrl(dataUrl: string, mimeType: string): { bytes: Uint8Array; mimeType: string; filename: string } {
-  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
-  if (!match) throw new Error('录音数据格式不正确。')
-  const detectedMimeType = match[1] || mimeType || 'audio/webm'
-  const bytes = Uint8Array.from(Buffer.from(match[2], 'base64'))
+  const parsed = parseAudioDataUrl(dataUrl, mimeType)
+  const bytes = Uint8Array.from(Buffer.from(parsed.base64, 'base64'))
+  if (bytes.byteLength === 0) throw new Error('录音数据为空。')
   return {
     bytes,
+    mimeType: parsed.mimeType,
+    filename: `voice-input.${audioExtension(parsed.mimeType)}`
+  }
+}
+
+function parseAudioDataUrl(dataUrl: string, fallbackMimeType: string): { mimeType: string; base64: string } {
+  const trimmed = dataUrl.trim()
+  const commaIndex = trimmed.indexOf(',')
+  if (!trimmed.startsWith('data:') || commaIndex < 0) {
+    throw new Error('录音数据格式不正确。')
+  }
+
+  const header = trimmed.slice(5, commaIndex)
+  const body = trimmed.slice(commaIndex + 1).replace(/\s/g, '')
+  const parts = header.split(';').filter(Boolean)
+  const detectedMimeType = parts.find((part) => part.includes('/')) || fallbackMimeType || 'audio/webm'
+  const isBase64 = parts.some((part) => part.toLowerCase() === 'base64')
+  if (!isBase64 || !body) throw new Error('录音数据格式不正确。')
+  return {
     mimeType: detectedMimeType,
-    filename: `voice-input.${audioExtension(detectedMimeType)}`
+    base64: body
   }
 }
 
