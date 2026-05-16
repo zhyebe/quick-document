@@ -644,7 +644,7 @@ export function App(): JSX.Element {
                 disabled={downloadingUpdate}
               >
                 {downloadingUpdate ? <Loader2 className="spin" size={14} /> : <Download size={14} />}
-                更新
+                打开更新页
               </button>
             </div>
           )}
@@ -1398,7 +1398,7 @@ function SettingsPanel({
               {updateStatus?.available && (
                 <button type="button" onClick={onDownloadUpdate} disabled={downloadingUpdate || saving}>
                   {downloadingUpdate ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
-                  下载并安装
+                  打开更新页
                 </button>
               )}
             </div>
