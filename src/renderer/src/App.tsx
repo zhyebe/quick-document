@@ -100,8 +100,12 @@ export function App(): JSX.Element {
   const voiceRecorderRef = useRef<MediaRecorder | null>(null)
   const voiceStreamRef = useRef<MediaStream | null>(null)
   const voiceChunksRef = useRef<BlobPart[]>([])
+  const voicePcmChunksRef = useRef<Float32Array[]>([])
+  const voicePcmSampleRateRef = useRef(44100)
   const voiceAudioContextRef = useRef<AudioContext | null>(null)
   const voiceAnalyserRef = useRef<AnalyserNode | null>(null)
+  const voiceSourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
+  const voiceProcessorRef = useRef<ScriptProcessorNode | null>(null)
   const voiceAnimationFrameRef = useRef<number | null>(null)
   const activeRequestIdRef = useRef<string | null>(null)
   const activeAssistantIdRef = useRef<string | null>(null)
@@ -320,13 +324,13 @@ export function App(): JSX.Element {
     const unsubscribe = window.quickDocument.onChatStream((event) => {
       if (event.requestId !== requestId || !event.message) return
       if (runTokenRef.current !== runToken) return
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantDraft.id
-            ? appendProcessEvent(message, event)
-            : message
+      setMessages((current) => {
+        const updated = current.map((message) =>
+          message.id === assistantDraft.id ? appendProcessEvent(message, event) : message
         )
-      )
+        messagesRef.current = updated
+        return updated
+      })
     })
 
     try {
@@ -388,22 +392,42 @@ export function App(): JSX.Element {
 
   async function stopActiveRequest(): Promise<void> {
     const requestId = activeRequestIdRef.current
-    if (!requestId) return
-    setStopping(true)
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === activeAssistantIdRef.current
-          ? appendProcessEvent(message, { type: 'status', message: '正在停止当前处理...' })
-          : message
-      )
-    )
-    const cancelled = await window.quickDocument.cancelMessage(requestId)
-    if (!cancelled) {
+    if (!requestId) {
       setStopping(false)
       setBusy(false)
-      activeRequestIdRef.current = null
-      activeAssistantIdRef.current = null
+      return
     }
+    setStopping(true)
+    void window.quickDocument.cancelMessage(requestId).catch((error) => {
+      setError(`停止请求失败：${formatRuntimeError(error)}`)
+    })
+    finishActiveRequestLocally('已手动停止当前处理，后续步骤没有继续执行。')
+  }
+
+  function finishActiveRequestLocally(content: string): void {
+    const activeAssistantId = activeAssistantIdRef.current
+    runTokenRef.current += 1
+    activeRequestIdRef.current = null
+    activeAssistantIdRef.current = null
+    setBusy(false)
+    setStopping(false)
+
+    if (!activeAssistantId) return
+    setMessages((current) => {
+      const updated = current.map((message) => {
+        if (message.id !== activeAssistantId) return message
+        return appendProcessEvent(
+          {
+            ...message,
+            content
+          },
+          { type: 'done', message: '已停止当前处理。' }
+        )
+      })
+      messagesRef.current = updated
+      void window.quickDocument.saveChatHistory(updated)
+      return updated
+    })
   }
 
   function messagesWithoutActiveDraft(): ChatMessage[] {
@@ -491,7 +515,10 @@ export function App(): JSX.Element {
   }
 
   async function startVoiceRecording(): Promise<void> {
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+    const AudioContextCtor =
+      window.AudioContext ||
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!navigator.mediaDevices?.getUserMedia || (!AudioContextCtor && typeof MediaRecorder === 'undefined')) {
       setError('当前系统暂不支持录音。请确认麦克风权限，或升级到新版系统组件。')
       return
     }
@@ -499,20 +526,23 @@ export function App(): JSX.Element {
     try {
       setError('')
       voiceChunksRef.current = []
+      voicePcmChunksRef.current = []
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const mimeType = preferredAudioMimeType()
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
       voiceStreamRef.current = stream
-      voiceRecorderRef.current = recorder
       startVoiceLevelMeter(stream)
 
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) voiceChunksRef.current.push(event.data)
+      if (typeof MediaRecorder !== 'undefined') {
+        const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+        voiceRecorderRef.current = recorder
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) voiceChunksRef.current.push(event.data)
+        }
+        recorder.onstop = () => {
+          void finishVoiceRecording(recorder.mimeType || mimeType || 'audio/webm')
+        }
+        recorder.start(250)
       }
-      recorder.onstop = () => {
-        void finishVoiceRecording(recorder.mimeType || mimeType || 'audio/webm')
-      }
-      recorder.start()
       setVoiceState('recording')
     } catch (error) {
       cleanupVoiceRecording()
@@ -523,19 +553,30 @@ export function App(): JSX.Element {
 
   function stopVoiceRecording(): void {
     const recorder = voiceRecorderRef.current
-    if (!recorder || recorder.state === 'inactive') {
-      cleanupVoiceRecording()
-      setVoiceState('idle')
+    if (!recorder) {
+      setVoiceState('attaching')
+      void finishVoiceRecording('audio/wav')
+      return
+    }
+    if (recorder.state === 'inactive') {
+      void finishVoiceRecording(recorder.mimeType || 'audio/webm')
       return
     }
     setVoiceState('attaching')
+    try {
+      recorder.requestData()
+    } catch {
+      // Some platforms throw when no encoded chunk is ready; the PCM path below still has the audio.
+    }
     recorder.stop()
   }
 
   async function finishVoiceRecording(mimeType: string): Promise<void> {
-    const blob = new Blob(voiceChunksRef.current, { type: mimeType })
+    const pcmBlob = pcmChunksToWavBlob(voicePcmChunksRef.current, voicePcmSampleRateRef.current)
+    const recorderBlob = new Blob(voiceChunksRef.current, { type: mimeType })
+    const blob = pcmBlob || recorderBlob
     cleanupVoiceRecording()
-    if (blob.size < 300) {
+    if (blob.size < 1000) {
       setVoiceState('idle')
       setError('没有录到有效语音。')
       return
@@ -556,6 +597,7 @@ export function App(): JSX.Element {
   function cleanupVoiceRecording(): void {
     voiceRecorderRef.current = null
     voiceChunksRef.current = []
+    voicePcmChunksRef.current = []
     stopVoiceLevelMeter()
     voiceStreamRef.current?.getTracks().forEach((track) => track.stop())
     voiceStreamRef.current = null
@@ -571,11 +613,24 @@ export function App(): JSX.Element {
     try {
       const context = new AudioContextCtor()
       const analyser = context.createAnalyser()
+      const source = context.createMediaStreamSource(stream)
+      const processor = context.createScriptProcessor(4096, 1, 1)
+      void context.resume().catch(() => undefined)
       analyser.fftSize = 512
       analyser.smoothingTimeConstant = 0.72
-      context.createMediaStreamSource(stream).connect(analyser)
+      source.connect(analyser)
+      source.connect(processor)
+      processor.connect(context.destination)
+      processor.onaudioprocess = (event) => {
+        const input = event.inputBuffer.getChannelData(0)
+        voicePcmChunksRef.current.push(new Float32Array(input))
+        event.outputBuffer.getChannelData(0).fill(0)
+      }
+      voicePcmSampleRateRef.current = context.sampleRate
       voiceAudioContextRef.current = context
       voiceAnalyserRef.current = analyser
+      voiceSourceRef.current = source
+      voiceProcessorRef.current = processor
       const samples = new Uint8Array(analyser.fftSize)
 
       const tick = (): void => {
@@ -602,6 +657,10 @@ export function App(): JSX.Element {
       window.cancelAnimationFrame(voiceAnimationFrameRef.current)
       voiceAnimationFrameRef.current = null
     }
+    voiceProcessorRef.current?.disconnect()
+    voiceProcessorRef.current = null
+    voiceSourceRef.current?.disconnect()
+    voiceSourceRef.current = null
     voiceAnalyserRef.current = null
     const context = voiceAudioContextRef.current
     voiceAudioContextRef.current = null
@@ -1066,6 +1125,7 @@ function formatRuntimeError(error: unknown): string {
 }
 
 function preferredAudioMimeType(): string {
+  if (typeof MediaRecorder === 'undefined') return ''
   const candidates = [
     'audio/webm;codecs=opus',
     'audio/webm',
@@ -1137,6 +1197,39 @@ function audioBufferToWavBlob(buffer: AudioBuffer): Blob {
   for (let frame = 0; frame < frameCount; frame += 1) {
     for (let channel = 0; channel < channelCount; channel += 1) {
       const sample = Math.max(-1, Math.min(1, channelData[channel][frame] || 0))
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
+      offset += 2
+    }
+  }
+
+  return new Blob([bytes], { type: 'audio/wav' })
+}
+
+function pcmChunksToWavBlob(chunks: Float32Array[], sampleRate: number): Blob | null {
+  const frameCount = chunks.reduce((total, chunk) => total + chunk.length, 0)
+  if (frameCount < Math.floor(sampleRate * 0.15)) return null
+
+  const bytes = new ArrayBuffer(44 + frameCount * 2)
+  const view = new DataView(bytes)
+
+  writeAscii(view, 0, 'RIFF')
+  view.setUint32(4, 36 + frameCount * 2, true)
+  writeAscii(view, 8, 'WAVE')
+  writeAscii(view, 12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  writeAscii(view, 36, 'data')
+  view.setUint32(40, frameCount * 2, true)
+
+  let offset = 44
+  for (const chunk of chunks) {
+    for (const value of chunk) {
+      const sample = Math.max(-1, Math.min(1, value || 0))
       view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
       offset += 2
     }
