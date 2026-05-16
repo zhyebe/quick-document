@@ -85,7 +85,7 @@ export function App(): JSX.Element {
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stopping, setStopping] = useState(false)
-  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'attaching'>('idle')
+  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
   const [voiceLevel, setVoiceLevel] = useState(0)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
@@ -506,6 +506,10 @@ export function App(): JSX.Element {
   }
 
   async function toggleVoiceInput(): Promise<void> {
+    if (!settingsRef.current?.hasXfyunVoiceConfig) {
+      setError('请先在设置中配置讯飞语音听写 APPID、APIKey 和 APISecret。')
+      return
+    }
     if (voiceState === 'recording') {
       stopVoiceRecording()
       return
@@ -554,7 +558,7 @@ export function App(): JSX.Element {
   function stopVoiceRecording(): void {
     const recorder = voiceRecorderRef.current
     if (!recorder) {
-      setVoiceState('attaching')
+      setVoiceState('transcribing')
       void finishVoiceRecording('audio/wav')
       return
     }
@@ -562,7 +566,7 @@ export function App(): JSX.Element {
       void finishVoiceRecording(recorder.mimeType || 'audio/webm')
       return
     }
-    setVoiceState('attaching')
+    setVoiceState('transcribing')
     try {
       recorder.requestData()
     } catch {
@@ -584,11 +588,19 @@ export function App(): JSX.Element {
 
     try {
       const audioBlob = await prepareVoiceAttachmentBlob(blob)
-      const attachment = await audioBlobToAttachment(audioBlob, mimeType)
-      setAttachments((current) => [...current, attachment])
+      const result = await window.quickDocument.transcribeVoice({
+        dataUrl: await blobToDataUrl(audioBlob),
+        mimeType: audioBlob.type || blob.type || mimeType || 'audio/wav',
+        language: 'zh'
+      })
+      if (!result.ok || !result.text) {
+        setError(result.message)
+        return
+      }
+      setInput((current) => appendTranscribedText(current, result.text || ''))
       composerTextareaRef.current?.focus()
     } catch (error) {
-      setError(`语音输入失败：${formatRuntimeError(error)}`)
+      setError(`语音转文字失败：${formatRuntimeError(error)}`)
     } finally {
       setVoiceState('idle')
     }
@@ -965,20 +977,22 @@ export function App(): JSX.Element {
                   className={`tool-button voice-input-button ${voiceState === 'recording' ? 'recording' : ''}`}
                   type="button"
                   onClick={() => void toggleVoiceInput()}
-                  disabled={voiceState === 'attaching'}
+                  disabled={voiceState === 'transcribing'}
                   title={
                     voiceState === 'recording'
-                      ? '停止录音并加入语音附件'
-                      : voiceState === 'attaching'
-                        ? '正在加入语音附件'
-                        : '语音输入'
+                      ? '停止录音并转文字'
+                      : voiceState === 'transcribing'
+                        ? '正在转文字'
+                        : settings?.hasXfyunVoiceConfig
+                          ? '语音输入'
+                          : '请先在设置中配置讯飞语音听写'
                   }
                 >
-                  {voiceState === 'attaching' ? (
+                  {voiceState === 'transcribing' ? (
                     <Loader2 className="spin" size={18} />
                   ) : voiceState === 'recording' ? (
                     <span className="voice-wave" aria-hidden="true">
-                      {[0.65, 0.9, 1.15, 0.8].map((weight, index) => (
+                      {[0.65, 0.9, 1.15, 0.8].map((weight) => (
                         <i
                           key={weight}
                           style={{
@@ -1257,6 +1271,13 @@ async function audioBlobToAttachment(blob: Blob, fallbackMimeType: string): Prom
   }
 }
 
+function appendTranscribedText(current: string, text: string): string {
+  const next = text.trim()
+  if (!next) return current
+  if (!current.trim()) return next
+  return `${current.replace(/\s+$/, '')}\n${next}`
+}
+
 function MessageBubble({ message }: { message: ChatMessage }): JSX.Element {
   const isAssistant = message.role === 'assistant'
 
@@ -1452,7 +1473,10 @@ function SettingsPanel({
     model: settings.model,
     workspacePath: settings.workspacePath,
     residentMode: settings.residentMode,
-    apiKey: ''
+    apiKey: '',
+    xfyunVoiceAppId: settings.xfyunVoiceAppId || '',
+    xfyunVoiceApiKey: '',
+    xfyunVoiceApiSecret: ''
   })
   const [saving, setSaving] = useState(false)
   const [importMessage, setImportMessage] = useState('')
@@ -1587,6 +1611,35 @@ function SettingsPanel({
               value={form.apiKey || ''}
               onChange={(event) => setForm((current) => ({ ...current, apiKey: event.target.value }))}
               placeholder={settings.hasApiKey ? '输入新 Key 可替换' : 'sk-...'}
+            />
+          </label>
+
+          <label>
+            <span>讯飞 APPID {settings.hasXfyunVoiceConfig ? '（语音已配置）' : ''}</span>
+            <input
+              value={form.xfyunVoiceAppId || ''}
+              onChange={(event) => setForm((current) => ({ ...current, xfyunVoiceAppId: event.target.value }))}
+              placeholder="讯飞开放平台 APPID"
+            />
+          </label>
+
+          <label>
+            <span>讯飞 APIKey {settings.hasXfyunVoiceConfig ? '（已保存，留空则不变）' : ''}</span>
+            <input
+              type="password"
+              value={form.xfyunVoiceApiKey || ''}
+              onChange={(event) => setForm((current) => ({ ...current, xfyunVoiceApiKey: event.target.value }))}
+              placeholder={settings.hasXfyunVoiceConfig ? '输入新 APIKey 可替换' : '讯飞语音听写 APIKey'}
+            />
+          </label>
+
+          <label>
+            <span>讯飞 APISecret {settings.hasXfyunVoiceConfig ? '（已保存，留空则不变）' : ''}</span>
+            <input
+              type="password"
+              value={form.xfyunVoiceApiSecret || ''}
+              onChange={(event) => setForm((current) => ({ ...current, xfyunVoiceApiSecret: event.target.value }))}
+              placeholder={settings.hasXfyunVoiceConfig ? '输入新 APISecret 可替换' : '讯飞语音听写 APISecret'}
             />
           </label>
 

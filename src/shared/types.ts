@@ -90,6 +90,8 @@ export interface AppSettings {
   apiConfigSource?: string
   usesExternalApiConfig: boolean
   cachedMessageCount: number
+  hasXfyunVoiceConfig: boolean
+  xfyunVoiceAppId?: string
 }
 
 export interface DoclingStatus {
@@ -113,6 +115,10 @@ export interface SettingsPatch {
   residentMode?: boolean
   apiKey?: string
   clearApiKey?: boolean
+  xfyunVoiceAppId?: string
+  xfyunVoiceApiKey?: string
+  xfyunVoiceApiSecret?: string
+  clearXfyunVoiceConfig?: boolean
 }
 
 export interface ExternalAiConfig {

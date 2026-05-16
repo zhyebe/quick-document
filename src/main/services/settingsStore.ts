@@ -22,8 +22,19 @@ interface StoredSettings {
   residentMode: boolean
   apiKeyCipher?: string
   apiKeyPlain?: string
+  xfyunVoiceAppId?: string
+  xfyunVoiceApiKeyCipher?: string
+  xfyunVoiceApiKeyPlain?: string
+  xfyunVoiceApiSecretCipher?: string
+  xfyunVoiceApiSecretPlain?: string
   recentFiles: GeneratedFile[]
   chatHistory: ChatHistorySnapshot
+}
+
+export interface XfyunVoiceConfig {
+  appId: string
+  apiKey: string
+  apiSecret: string
 }
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
@@ -39,6 +50,7 @@ export class SettingsStore {
   public getPublicSettings(): AppSettings {
     const stored = this.read()
     const storedApiKey = this.getStoredApiKey(stored)
+    const xfyunVoiceConfig = this.getStoredXfyunVoiceConfig(stored)
     const external = loadExternalAiConfig()
     this.ensureWorkspace(stored.workspacePath)
 
@@ -52,7 +64,9 @@ export class SettingsStore {
       hasApiKey: Boolean(external?.apiKey || storedApiKey),
       apiConfigSource: external?.source || (storedApiKey ? 'Quick Document 设置' : undefined),
       usesExternalApiConfig: Boolean(external?.apiKey),
-      cachedMessageCount: stored.chatHistory.messages.length
+      cachedMessageCount: stored.chatHistory.messages.length,
+      hasXfyunVoiceConfig: Boolean(xfyunVoiceConfig),
+      xfyunVoiceAppId: stored.xfyunVoiceAppId
     }
   }
 
@@ -76,13 +90,25 @@ export class SettingsStore {
 
     if (patch.apiKey?.trim()) {
       const apiKey = patch.apiKey.trim()
-      if (safeStorage.isEncryptionAvailable()) {
-        next.apiKeyCipher = safeStorage.encryptString(apiKey).toString('base64')
-        delete next.apiKeyPlain
-      } else {
-        next.apiKeyPlain = apiKey
-        delete next.apiKeyCipher
-      }
+      this.setSecret(next, 'apiKey', apiKey)
+    }
+
+    if (patch.clearXfyunVoiceConfig) {
+      delete next.xfyunVoiceAppId
+      delete next.xfyunVoiceApiKeyCipher
+      delete next.xfyunVoiceApiKeyPlain
+      delete next.xfyunVoiceApiSecretCipher
+      delete next.xfyunVoiceApiSecretPlain
+    }
+
+    if (typeof patch.xfyunVoiceAppId === 'string') {
+      next.xfyunVoiceAppId = patch.xfyunVoiceAppId.trim()
+    }
+    if (patch.xfyunVoiceApiKey?.trim()) {
+      this.setSecret(next, 'xfyunVoiceApiKey', patch.xfyunVoiceApiKey.trim())
+    }
+    if (patch.xfyunVoiceApiSecret?.trim()) {
+      this.setSecret(next, 'xfyunVoiceApiSecret', patch.xfyunVoiceApiSecret.trim())
     }
 
     this.ensureWorkspace(next.workspacePath)
@@ -111,16 +137,49 @@ export class SettingsStore {
     return ''
   }
 
+  public getXfyunVoiceConfig(): XfyunVoiceConfig | null {
+    return this.getStoredXfyunVoiceConfig(this.read())
+  }
+
   private getStoredApiKey(stored: StoredSettings): string {
-    if (stored.apiKeyCipher && safeStorage.isEncryptionAvailable()) {
+    return this.getSecret(stored.apiKeyCipher, stored.apiKeyPlain)
+  }
+
+  private getStoredXfyunVoiceConfig(stored: StoredSettings): XfyunVoiceConfig | null {
+    const appId = stored.xfyunVoiceAppId?.trim() || ''
+    const apiKey = this.getSecret(stored.xfyunVoiceApiKeyCipher, stored.xfyunVoiceApiKeyPlain)
+    const apiSecret = this.getSecret(stored.xfyunVoiceApiSecretCipher, stored.xfyunVoiceApiSecretPlain)
+    if (!appId || !apiKey || !apiSecret) return null
+    return { appId, apiKey, apiSecret }
+  }
+
+  private getSecret(cipher: string | undefined, plain: string | undefined): string {
+    if (cipher && safeStorage.isEncryptionAvailable()) {
       try {
-        return safeStorage.decryptString(Buffer.from(stored.apiKeyCipher, 'base64'))
+        return safeStorage.decryptString(Buffer.from(cipher, 'base64'))
       } catch {
         return ''
       }
     }
 
-    return stored.apiKeyPlain || ''
+    return plain || ''
+  }
+
+  private setSecret(
+    settings: StoredSettings,
+    field: 'apiKey' | 'xfyunVoiceApiKey' | 'xfyunVoiceApiSecret',
+    value: string
+  ): void {
+    const cipherKey = `${field}Cipher` as keyof StoredSettings
+    const plainKey = `${field}Plain` as keyof StoredSettings
+    const mutable = settings as unknown as Record<string, unknown>
+    if (safeStorage.isEncryptionAvailable()) {
+      mutable[cipherKey] = safeStorage.encryptString(value).toString('base64')
+      delete mutable[plainKey]
+    } else {
+      mutable[plainKey] = value
+      delete mutable[cipherKey]
+    }
   }
 
   public getRecentFiles(): GeneratedFile[] {

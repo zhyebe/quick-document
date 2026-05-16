@@ -262,12 +262,8 @@ function registerIpc(): void {
   ipcMain.handle('updates:check', () => checkForUpdates())
   ipcMain.handle('updates:download', (_event, status?: UpdateStatus) => downloadAndOpenUpdate(status))
   ipcMain.handle('voice:transcribe', (_event, request: VoiceTranscriptionRequest) => {
-    const publicSettings = settingsStore.getPublicSettings()
     return transcribeVoiceInput(request, {
-      provider: publicSettings.provider,
-      baseUrl: publicSettings.baseUrl,
-      model: publicSettings.model,
-      apiKey: settingsStore.getApiKey()
+      xfyunVoiceConfig: settingsStore.getXfyunVoiceConfig()
     })
   })
 
