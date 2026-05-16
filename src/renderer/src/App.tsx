@@ -593,89 +593,91 @@ export function App(): JSX.Element {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand-block">
-          <div className="brand-mark">
-            <Sparkles size={18} />
+        <div className="sidebar-main">
+          <div className="brand-block">
+            <div className="brand-mark">
+              <Sparkles size={18} />
+            </div>
+            <div>
+              <strong>Quick Document</strong>
+              <span>Document Workflow</span>
+            </div>
           </div>
-          <div>
-            <strong>Quick Document</strong>
-            <span>Document Workflow</span>
-          </div>
+
+          <button className="primary-nav active" type="button">
+            <MessageSquareText size={18} />
+            文档工作流
+          </button>
+
+          <section className="side-section">
+            <div className="section-title">状态</div>
+            <div className="status-card">
+              <MonitorUp size={17} />
+              <span>{statusText}</span>
+            </div>
+            <div className="status-card">
+              <FileText size={17} />
+              <span>
+                {doclingStatus?.installed
+                  ? `Docling 已启用：${doclingStatus.engine || 'available'}`
+                  : doclingStatus?.message || '正在检测 Docling...'}
+              </span>
+              {doclingStatus && !doclingStatus.installed && (
+                <button
+                  className="mini-action"
+                  type="button"
+                  onClick={() => void installDoclingDependency()}
+                  disabled={installingDocling}
+                >
+                  {installingDocling ? <Loader2 className="spin" size={14} /> : <Check size={14} />}
+                  安装
+                </button>
+              )}
+            </div>
+            {updateStatus?.available && (
+              <div className="status-card update-card">
+                <Download size={17} />
+                <span>{updateStatus.message}</span>
+                <button
+                  className="mini-action"
+                  type="button"
+                  onClick={() => void downloadLatestUpdate()}
+                  disabled={downloadingUpdate}
+                >
+                  {downloadingUpdate ? <Loader2 className="spin" size={14} /> : <Download size={14} />}
+                  打开更新页
+                </button>
+              </div>
+            )}
+          </section>
+
+          <section className="side-section recent-list">
+            <div className="section-title">产物</div>
+            {recentFiles.length === 0 ? (
+              <p className="muted">完成后的文件会显示在这里。</p>
+            ) : (
+              recentFiles.slice(0, 6).map((file) => (
+                <button
+                  key={file.id}
+                  className="recent-item"
+                  type="button"
+                  onClick={() => void window.quickDocument.openFile(file.path)}
+                  title={file.path}
+                >
+                  {kindIcon(file.kind)}
+                  <span>{file.name}</span>
+                </button>
+              ))
+            )}
+          </section>
         </div>
 
-        <button className="primary-nav active" type="button">
-          <MessageSquareText size={18} />
-          文档工作流
-        </button>
-
-        <section className="side-section">
-          <div className="section-title">状态</div>
-          <div className="status-card">
-            <MonitorUp size={17} />
-            <span>{statusText}</span>
-          </div>
-          <div className="status-card">
-            <FileText size={17} />
-            <span>
-              {doclingStatus?.installed
-                ? `Docling 已启用：${doclingStatus.engine || 'available'}`
-                : doclingStatus?.message || '正在检测 Docling...'}
-            </span>
-            {doclingStatus && !doclingStatus.installed && (
-              <button
-                className="mini-action"
-                type="button"
-                onClick={() => void installDoclingDependency()}
-                disabled={installingDocling}
-              >
-                {installingDocling ? <Loader2 className="spin" size={14} /> : <Check size={14} />}
-                安装
-              </button>
-            )}
-          </div>
-          {updateStatus?.available && (
-            <div className="status-card update-card">
-              <Download size={17} />
-              <span>{updateStatus.message}</span>
-              <button
-                className="mini-action"
-                type="button"
-                onClick={() => void downloadLatestUpdate()}
-                disabled={downloadingUpdate}
-              >
-                {downloadingUpdate ? <Loader2 className="spin" size={14} /> : <Download size={14} />}
-                打开更新页
-              </button>
-            </div>
-          )}
-        </section>
-
-        <section className="side-section recent-list">
-          <div className="section-title">产物</div>
-          {recentFiles.length === 0 ? (
-            <p className="muted">完成后的文件会显示在这里。</p>
-          ) : (
-            recentFiles.slice(0, 6).map((file) => (
-              <button
-                key={file.id}
-                className="recent-item"
-                type="button"
-                onClick={() => void window.quickDocument.openFile(file.path)}
-                title={file.path}
-              >
-                {kindIcon(file.kind)}
-                <span>{file.name}</span>
-              </button>
-            ))
-          )}
-        </section>
-
-        <div className="sidebar-spacer" />
-
-        <button className="secondary-nav" type="button" onClick={() => setSettingsOpen(true)}>
-          <Settings size={18} />
-          设置
-        </button>
+        <div className="sidebar-footer">
+          <button className="secondary-nav" type="button" onClick={() => setSettingsOpen(true)}>
+            <Settings size={18} />
+            设置
+          </button>
+        </div>
       </aside>
 
       <main className="workspace">
