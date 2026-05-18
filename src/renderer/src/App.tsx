@@ -314,7 +314,14 @@ export function App(): JSX.Element {
       role: 'assistant',
       content: '',
       createdAt: new Date().toISOString(),
-      events: []
+      events: [
+        {
+          id: `${requestId}-event-start`,
+          createdAt: new Date().toISOString(),
+          message: '正在准备文档上下文...',
+          status: 'running'
+        }
+      ]
     }
     const visibleMessages = [...requestMessages, assistantDraft]
     const runToken = runTokenRef.current + 1
@@ -329,7 +336,8 @@ export function App(): JSX.Element {
     setError('')
 
     const unsubscribe = window.quickDocument.onChatStream((event) => {
-      if (event.requestId !== requestId || !event.message) return
+      if (event.requestId !== requestId) return
+      if (event.type === 'assistant-delta' ? !event.delta : !event.message) return
       if (runTokenRef.current !== runToken) return
       setMessages((current) => {
         const updated = current.map((message) =>

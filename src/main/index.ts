@@ -289,8 +289,10 @@ function registerIpc(): void {
 
     try {
       const publicSettings = settingsStore.getPublicSettings()
+      emit({ type: 'status', message: '正在读取当前文档目录...' })
       const workspaceSnapshot = scanWorkspace(publicSettings.workspacePath)
       const latestPrompt = request.messages[request.messages.length - 1]?.content || ''
+      emit({ type: 'status', message: '正在读取相关文档预览...' })
       const documentPreviewContext = await buildDocumentPreviewContext(
         latestPrompt,
         request.targetFiles || [],
@@ -299,6 +301,7 @@ function registerIpc(): void {
       const doclingPreviewContext = await buildDoclingPreviewContext(
         request.targetFiles.length > 0 ? request.targetFiles : workspaceSnapshot.files
       )
+      emit({ type: 'status', message: '正在发送给 AI，等待模型返回...' })
       const agentInput = {
         messages: request.messages,
         targetFiles: request.targetFiles || [],
