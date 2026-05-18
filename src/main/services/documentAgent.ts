@@ -75,6 +75,7 @@ Core rules:
 - If a tool fails, read the error and continue in the same conversation. Do not repeat the same wrong path.
 - Prefer run_document_script for all real document changes. The script can use quickDocument.ExcelJS, quickDocument.docx, quickDocument.pptxgen, quickDocument.JSZip, quickDocument.fs, and quickDocument.path.
 - In packaged desktop mode, prefer quickDocument.ExcelJS/JSZip/docx/pptxgen instead of bare package imports. If you import those packages anyway, the tool will try to map common imports for compatibility.
+- Write valid, readable JavaScript. Do not minify syntax; keep spaces in constructs such as "for (const filePath of files)".
 - Scripts must write files themselves and call quickDocument.writeResult({ filePath }) for the primary changed file.
 - If the user asks to create or update a SKILL, use write_skill_file and author the SKILL content yourself. The app only stores it.
 - Keep final Chinese replies concise and result-focused. Do not output JSON workflow to the user.
@@ -255,7 +256,7 @@ async function readOpenAiChatStream(
       for (const choice of choices) {
         if (!isRecord(choice) || !isRecord(choice.delta)) continue
         const delta = choice.delta
-        const textDelta = stringValue(delta.content) || ''
+        const textDelta = rawStringValue(delta.content) || ''
         if (textDelta) {
           content += textDelta
           onDelta?.(textDelta)
@@ -276,7 +277,7 @@ async function readOpenAiChatStream(
             id: stringValue(call.id) || current.id,
             type: stringValue(call.type) || current.type || 'function',
             name: stringValue(fn.name) || current.name,
-            argumentsText: current.argumentsText + (stringValue(fn.arguments) || '')
+            argumentsText: current.argumentsText + (rawStringValue(fn.arguments) || '')
           })
         }
       }
@@ -576,7 +577,7 @@ async function executeAgentTool(
     }
 
     actionResults.push(result)
-    input.onProgress?.(`工具执行失败，错误已交回 AI：${result.error || result.summary}`)
+    input.onProgress?.(`工具执行失败，已把完整错误交回 AI 继续修复。${formatToolErrorForUser(result.error || result.summary)}`)
     return {
       ok: false,
       message: result.summary,
@@ -1018,7 +1019,42 @@ function sanitizeSkillPathPart(value: string): string {
 
 function visibleActionResults(results: ActionResult[]): ActionResult[] {
   const successes = results.filter((result) => result.ok)
-  return successes.length > 0 ? successes : results.slice(-3)
+  const visible = successes.length > 0 ? successes : results.slice(-3)
+  return visible.map((result) => {
+    if (result.ok || !result.error) return result
+    return {
+      ...result,
+      error: formatToolErrorForUser(result.error)
+    }
+  })
+}
+
+function formatToolErrorForUser(error: string): string {
+  const normalized = error
+    .replace(/\r/g, '')
+    .replace(/Command failed:\s*[^\n]+/gi, '')
+    .replace(/file:\/\/\/[^\n]+/g, '')
+    .replace(/\/(?:Applications|Users|private|var)\/[^\s]+/g, '[local path]')
+    .replace(/\s+at\s+[^\n]+/g, '')
+    .replace(/Node\.js v[\d.]+/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+
+  const syntaxLine = normalized.match(/SyntaxError:\s*([^\n]+)/i)?.[1]
+  if (syntaxLine) {
+    const line = error.match(/action\.mjs:(\d+)/)?.[1]
+    return `脚本语法错误${line ? `（第 ${line} 行）` : ''}：${syntaxLine}`
+  }
+
+  const runtimeLine =
+    normalized.match(/(?:Error|TypeError|ReferenceError|RangeError):\s*([^\n]+)/i)?.[0] ||
+    normalized
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line && !/^\^+$/.test(line)) ||
+    '未知错误'
+
+  return runtimeLine.replace(/\s+/g, ' ').slice(0, 180)
 }
 
 function shouldAskAiToRepairAfterToolFailure(results: ActionResult[]): boolean {
@@ -1308,6 +1344,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function rawStringValue(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
 }
 
 function stringArrayValue(value: unknown): string[] | undefined {

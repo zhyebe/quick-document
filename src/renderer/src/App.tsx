@@ -1109,7 +1109,7 @@ function appendAssistantDelta(message: ChatMessage, delta: string): ChatMessage 
 }
 
 function appendProcessEvent(message: ChatMessage, event: Pick<ChatStreamEvent, 'type' | 'message'>): ChatMessage {
-  const nextText = event.message?.trim()
+  const nextText = formatProcessMessage(event.message)
   if (!nextText) return message
   const events = message.events || []
   const status = processEventStatus(event.type)
@@ -1141,6 +1141,20 @@ function appendProcessEvent(message: ChatMessage, event: Pick<ChatStreamEvent, '
       }
     ].slice(-80)
   }
+}
+
+function formatProcessMessage(message: string | undefined): string {
+  const text = message?.trim() || ''
+  if (!text) return ''
+  const syntax = text.match(/SyntaxError:\s*([^\n]+)/i)?.[0]
+  if (syntax) return syntax.slice(0, 220)
+  if (text.length <= 360 && text.split(/\r?\n/).length <= 4) return text
+  const firstMeaningfulLine =
+    text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('at ') && !line.startsWith('file:///')) || text
+  return `${firstMeaningfulLine.replace(/\s+/g, ' ').slice(0, 220)}...`
 }
 
 function processEventStatus(type: ChatStreamEvent['type']): ChatProcessEvent['status'] {
