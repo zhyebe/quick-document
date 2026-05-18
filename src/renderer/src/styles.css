@@ -40,7 +40,7 @@ button {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
   height: 100%;
-  min-width: 940px;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
   background: #f6f7f7;
@@ -465,8 +465,11 @@ button {
 
 .messages {
   min-height: 0;
-  overflow: auto;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 4px 0 22px;
+  overscroll-behavior: contain;
   scroll-behavior: auto;
 }
 
@@ -494,14 +497,16 @@ button {
 
 .message {
   display: grid;
-  grid-template-columns: 32px minmax(0, 760px);
+  grid-template-columns: 32px minmax(0, 1fr);
   gap: 12px;
+  width: min(860px, calc(100% - 32px));
   margin: 18px auto;
   max-width: 860px;
+  min-width: 0;
 }
 
 .message.user {
-  grid-template-columns: minmax(0, 760px) 32px;
+  grid-template-columns: minmax(0, 1fr) 32px;
 }
 
 .message.user .avatar {
@@ -533,14 +538,19 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .bubble {
   width: fit-content;
   max-width: 100%;
+  min-width: 0;
   padding: 13px 15px;
   color: #1f2937;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   line-height: 1.58;
   background: #ffffff;
   border: 1px solid #dfe4ea;
@@ -566,6 +576,7 @@ button {
   flex-direction: column;
   gap: 0;
   width: min(100%, 720px);
+  min-width: 0;
   padding: 6px 0 4px;
   color: #56616f;
 }
@@ -611,6 +622,7 @@ button {
 }
 
 .process-events {
+  min-width: 0;
   padding-top: 2px;
 }
 
@@ -671,8 +683,11 @@ button {
 
 .process-event p {
   margin: 0;
+  min-width: 0;
   color: #4b5563;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .process-event.error p {
@@ -692,6 +707,8 @@ button {
   align-items: center;
   gap: 7px;
   width: fit-content;
+  max-width: 100%;
+  min-width: 0;
   min-height: 30px;
   padding: 0 9px;
   color: #445062;
@@ -706,7 +723,9 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  width: min(100%, 620px);
   max-width: 620px;
+  min-width: 0;
   padding: 12px;
   background: #ffffff;
   border: 1px solid #dfe4ea;
@@ -728,9 +747,15 @@ button {
   min-width: 0;
 }
 
+.action-main > div {
+  min-width: 0;
+}
+
 .action-main strong,
 .action-main span {
   display: block;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .action-main strong {
