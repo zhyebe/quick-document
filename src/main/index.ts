@@ -3,6 +3,8 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type {
+  ChatGuidanceRequest,
+  ChatMessage,
   ChatRequest,
   ChatResponse,
   ChatStreamEvent,
@@ -25,6 +27,7 @@ let tray: Tray | null = null
 let isQuitting = false
 let settingsStore: SettingsStore
 const activeChatControllers = new Map<string, AbortController>()
+const activeGuidanceSessions = new Map<string, { pending: ChatMessage[]; all: ChatMessage[] }>()
 const mainDir = dirname(fileURLToPath(import.meta.url))
 
 app.commandLine.appendSwitch('disable-features', 'MacWebContentsOcclusion,CalculateNativeWinOcclusion')
@@ -224,6 +227,13 @@ function registerIpc(): void {
     controller.abort()
     return true
   })
+  ipcMain.handle('chat:guide', (_event, request: ChatGuidanceRequest) => {
+    const session = activeGuidanceSessions.get(request.requestId)
+    if (!session) return false
+    session.pending.push(request.message)
+    session.all.push(request.message)
+    return true
+  })
   ipcMain.handle('docling:status', () => getDoclingStatus())
   ipcMain.handle('docling:install', async () => {
     const status = await getDoclingStatus()
@@ -270,20 +280,17 @@ function registerIpc(): void {
   ipcMain.handle('chat:send', async (event, request: ChatRequest): Promise<ChatResponse> => {
     const requestId = request.requestId || `${Date.now()}-${Math.random().toString(16).slice(2)}`
     const abortController = new AbortController()
+    const guidanceSession = { pending: [] as ChatMessage[], all: [] as ChatMessage[] }
     activeChatControllers.set(requestId, abortController)
+    activeGuidanceSessions.set(requestId, guidanceSession)
     const emit = (payload: Omit<ChatStreamEvent, 'requestId'>): void => {
       event.sender.send('chat:stream', { requestId, ...payload })
     }
 
     try {
       const publicSettings = settingsStore.getPublicSettings()
-      emit({ type: 'status', message: '正在读取当前文档目录...' })
       const workspaceSnapshot = scanWorkspace(publicSettings.workspacePath)
       const latestPrompt = request.messages[request.messages.length - 1]?.content || ''
-      emit({
-        type: 'status',
-        message: `已读取目录，发现 ${workspaceSnapshot.files.length} 个 Office 文件。正在读取相关文档预览...`
-      })
       const documentPreviewContext = await buildDocumentPreviewContext(
         latestPrompt,
         request.targetFiles || [],
@@ -292,8 +299,6 @@ function registerIpc(): void {
       const doclingPreviewContext = await buildDoclingPreviewContext(
         request.targetFiles.length > 0 ? request.targetFiles : workspaceSnapshot.files
       )
-      emit({ type: 'status', message: '正在把目录、文档预览和 Office SKILL 发送给 AI...' })
-      const heartbeat = startChatHeartbeat(emit)
       const agentInput = {
         messages: request.messages,
         targetFiles: request.targetFiles || [],
@@ -315,10 +320,11 @@ function registerIpc(): void {
           apiKey: settingsStore.getApiKey()
         },
         signal: abortController.signal,
-        onProgress: (message: string) => emit({ type: 'status', message })
+        onProgress: (message: string) => emit({ type: 'status', message }),
+        onAssistantDelta: (delta: string) => emit({ type: 'assistant-delta', delta }),
+        consumeGuidance: () => guidanceSession.pending.splice(0)
       }
       const agentResult = await runDocumentAgent(agentInput)
-        .finally(heartbeat)
 
       const results = agentResult.actionResults
       for (const result of results) {
@@ -336,7 +342,7 @@ function registerIpc(): void {
         createdAt: new Date().toISOString(),
         actions: results
       }
-      settingsStore.saveChatHistory([...request.messages, assistantMessage])
+      settingsStore.saveChatHistory([...request.messages, ...guidanceSession.all, assistantMessage])
       emit({ type: 'done', message: generatedFiles.length > 0 ? '处理完成，已刷新文档目录和产物列表。' : '处理完成。' })
 
       return {
@@ -354,24 +360,25 @@ function registerIpc(): void {
         createdAt: new Date().toISOString(),
         actions: []
       }
-      settingsStore.saveChatHistory([...request.messages, assistantMessage])
+      settingsStore.saveChatHistory([...request.messages, ...guidanceSession.all, assistantMessage])
       return {
         message: assistantMessage,
         generatedFiles: []
       }
     } finally {
       activeChatControllers.delete(requestId)
+      activeGuidanceSessions.delete(requestId)
     }
   })
 }
 
 function buildAssistantReply(reply: string, results: Array<{ ok: boolean; summary: string; error?: string; file?: unknown }>): string {
-  if (results.length === 0) return reply
-  const lines = results.map((result) => {
-    if (result.ok && result.file) return `- ${result.summary}`
-    return `- ${result.summary}: ${result.error || 'unknown error'}`
-  })
-  return `${reply}\n\n处理结果：\n${lines.join('\n')}`
+  const text = reply.trim()
+  if (text) return text
+  if (results.length === 0) return ''
+  return results
+    .map((result) => (result.ok ? result.summary : `${result.summary}: ${result.error || 'unknown error'}`))
+    .join('\n')
 }
 
 function chatFailureMessage(error: unknown): string {
@@ -395,23 +402,6 @@ function chatFailureMessage(error: unknown): string {
     return 'AI Key 不可用或认证失败，当前没有修改任何文档。请检查 cc-switch / API Key 配置。'
   }
   return `处理没有完成，当前没有修改任何文档。原因：${message || '未知错误'}`
-}
-
-function startChatHeartbeat(emit: (payload: Omit<ChatStreamEvent, 'requestId'>) => void): () => void {
-  const startedAt = Date.now()
-  let index = 0
-  const messages = [
-    'AI 正在读取目录上下文和 Office SKILL...',
-    'AI 正在决定是否调用文档工具...',
-    'AI 正在按工具结果继续处理...',
-    'AI 仍在处理，复杂文档可能需要更久...'
-  ]
-  const timer = setInterval(() => {
-    const elapsed = Math.round((Date.now() - startedAt) / 1000)
-    emit({ type: 'status', message: `${messages[index % messages.length]}（${elapsed}s）` })
-    index += 1
-  }, 1800)
-  return () => clearInterval(timer)
 }
 
 process.on('uncaughtException', (error) => logMain('process:uncaughtException', error))

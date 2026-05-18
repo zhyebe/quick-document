@@ -286,7 +286,20 @@ export function App(): JSX.Element {
     }
     const baseMessages = busy ? messagesWithoutActiveDraft() : messagesRef.current
     if (busy && activeRequestIdRef.current) {
-      void window.quickDocument.cancelMessage(activeRequestIdRef.current)
+      setInput('')
+      setAttachments([])
+      const visibleMessages = insertBeforeActiveAssistant(messagesRef.current, userMessage, activeAssistantIdRef.current)
+      messagesRef.current = visibleMessages
+      setMessages(visibleMessages)
+      void window.quickDocument.saveChatHistory(
+        visibleMessages.filter((message) => message.id !== activeAssistantIdRef.current)
+      )
+      const accepted = await window.quickDocument.sendGuidance({
+        requestId: activeRequestIdRef.current,
+        message: userMessage
+      })
+      if (!accepted) setError('当前处理已经结束，这条补充引导没有送入正在运行的 AI。')
+      return
     }
     setInput('')
     setAttachments([])
@@ -299,15 +312,9 @@ export function App(): JSX.Element {
     const assistantDraft: ChatMessage = {
       id: `${requestId}-assistant`,
       role: 'assistant',
-      content: '正在读取当前文档目录...',
+      content: '',
       createdAt: new Date().toISOString(),
-      events: [
-        {
-          id: `${requestId}-event-start`,
-          createdAt: new Date().toISOString(),
-          message: '正在读取当前文档目录...'
-        }
-      ]
+      events: []
     }
     const visibleMessages = [...requestMessages, assistantDraft]
     const runToken = runTokenRef.current + 1
@@ -326,7 +333,7 @@ export function App(): JSX.Element {
       if (runTokenRef.current !== runToken) return
       setMessages((current) => {
         const updated = current.map((message) =>
-          message.id === assistantDraft.id ? appendProcessEvent(message, event) : message
+          message.id === assistantDraft.id ? applyChatStreamEvent(message, event) : message
         )
         messagesRef.current = updated
         return updated
@@ -345,6 +352,7 @@ export function App(): JSX.Element {
         const draft = current.find((message) => message.id === assistantDraft.id)
         const finalMessage: ChatMessage = {
           ...response.message,
+          content: response.message.content || draft?.content || '',
           events: draft?.events || response.message.events
         }
         const withoutDraft = current.filter((message) => message.id !== assistantDraft.id)
@@ -1038,7 +1046,7 @@ export function App(): JSX.Element {
                   className="send-button"
                   type="submit"
                   disabled={(!input.trim() && attachments.length === 0) || stopping}
-                  title={busy ? '发送补充引导并重新开始' : '发送'}
+                  title={busy ? '发送补充引导' : '发送'}
                 >
                   {busy && !input.trim() && attachments.length === 0 ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
                 </button>
@@ -1072,6 +1080,32 @@ export function App(): JSX.Element {
       )}
     </div>
   )
+}
+
+function insertBeforeActiveAssistant(
+  messages: ChatMessage[],
+  userMessage: ChatMessage,
+  activeAssistantId: string | null
+): ChatMessage[] {
+  if (!activeAssistantId) return [...messages, userMessage]
+  const index = messages.findIndex((message) => message.id === activeAssistantId)
+  if (index < 0) return [...messages, userMessage]
+  return [...messages.slice(0, index), userMessage, ...messages.slice(index)]
+}
+
+function applyChatStreamEvent(message: ChatMessage, event: ChatStreamEvent): ChatMessage {
+  if (event.type === 'assistant-delta') {
+    return appendAssistantDelta(message, event.delta || event.message || '')
+  }
+  return appendProcessEvent(message, event)
+}
+
+function appendAssistantDelta(message: ChatMessage, delta: string): ChatMessage {
+  if (!delta) return message
+  return {
+    ...message,
+    content: `${message.content || ''}${delta}`
+  }
 }
 
 function appendProcessEvent(message: ChatMessage, event: Pick<ChatStreamEvent, 'type' | 'message'>): ChatMessage {
@@ -1280,12 +1314,13 @@ function appendTranscribedText(current: string, text: string): string {
 
 function MessageBubble({ message }: { message: ChatMessage }): JSX.Element {
   const isAssistant = message.role === 'assistant'
+  const hasContent = message.content.trim().length > 0
 
   return (
     <div className={`message ${isAssistant ? 'assistant' : 'user'}`}>
       <div className="avatar">{isAssistant ? <Bot size={16} /> : <span>你</span>}</div>
       <div className="message-stack">
-        <div className="bubble">{message.content}</div>
+        {(!isAssistant || hasContent) && <div className="bubble">{message.content}</div>}
         {isAssistant && message.events && message.events.length > 0 && (
           <ProcessLog events={message.events} />
         )}

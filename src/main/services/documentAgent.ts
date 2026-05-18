@@ -32,6 +32,8 @@ export interface DocumentAgentInput {
   settings: AgentSettings
   signal?: AbortSignal
   onProgress?: (message: string) => void
+  onAssistantDelta?: (delta: string) => void
+  consumeGuidance?: () => ChatMessage[]
 }
 
 export interface DocumentAgentOutput {
@@ -116,12 +118,13 @@ async function runOpenAiChatAgent(input: DocumentAgentInput): Promise<DocumentAg
 
   for (let turn = 0; turn < maxTurns; turn += 1) {
     ensureNotCancelled(input.signal)
-    input.onProgress?.(turn === 0 ? 'AI 正在结合文档 SKILL 理解请求...' : 'AI 正在根据工具结果继续处理...')
+    appendOpenAiChatGuidance(input, messages)
     const assistantMessage = await callOpenAiChatTurn(input, messages)
     const toolCalls = extractOpenAiChatToolCalls(assistantMessage)
     const content = stringValue(assistantMessage.content)
 
     if (toolCalls.length === 0) {
+      if (appendOpenAiChatGuidance(input, messages, content)) continue
       if (shouldAskAiToRepairAfterToolFailure(actionResults)) {
         input.onProgress?.('文档工具上一步失败，AI 没有继续调用工具，正在要求它换方法重试...')
         messages.push({
@@ -134,8 +137,10 @@ async function runOpenAiChatAgent(input: DocumentAgentInput): Promise<DocumentAg
         })
         continue
       }
+      const reply = content || buildDefaultReply(actionResults)
+      if (!content) input.onAssistantDelta?.(reply)
       return {
-        reply: content || buildDefaultReply(actionResults),
+        reply,
         actionResults: visibleActionResults(actionResults)
       }
     }
@@ -182,7 +187,8 @@ async function callOpenAiChatTurn(
           messages,
           tools: openAiTools(),
           tool_choice: 'auto',
-          parallel_tool_calls: false
+          parallel_tool_calls: false,
+          stream: true
         })
       },
       input.settings.requestTimeoutMs,
@@ -192,9 +198,136 @@ async function callOpenAiChatTurn(
       const text = await response.text()
       throw createRemoteRequestError('OpenAI-compatible request', response.status, text)
     }
-    const data = (await response.json()) as { choices?: Array<{ message?: Record<string, unknown> }> }
-    return data.choices?.[0]?.message || {}
+    if (!isEventStreamResponse(response)) {
+      const data = (await response.json()) as { choices?: Array<{ message?: Record<string, unknown> }> }
+      const message = data.choices?.[0]?.message || {}
+      const content = stringValue(message.content)
+      if (content) input.onAssistantDelta?.(content)
+      return message
+    }
+
+    return readOpenAiChatStream(response, input.onAssistantDelta)
   })
+}
+
+interface ChatCompletionToolCallDraft {
+  id?: string
+  type?: string
+  name: string
+  argumentsText: string
+}
+
+function isEventStreamResponse(response: Response): boolean {
+  return /text\/event-stream|stream/i.test(response.headers.get('content-type') || '')
+}
+
+async function readOpenAiChatStream(
+  response: Response,
+  onDelta?: (delta: string) => void
+): Promise<Record<string, unknown>> {
+  if (!response.body) return {}
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const toolCalls = new Map<number, ChatCompletionToolCallDraft>()
+  let buffer = ''
+  let raw = ''
+  let content = ''
+  let sawSseData = false
+
+  const processEvent = (event: string): void => {
+    const dataLines = event
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+    if (dataLines.length === 0) return
+    sawSseData = true
+
+    for (const dataLine of dataLines) {
+      if (!dataLine || dataLine === '[DONE]') continue
+      let data: unknown
+      try {
+        data = JSON.parse(dataLine)
+      } catch {
+        continue
+      }
+      if (!isRecord(data)) continue
+      const choices = Array.isArray(data.choices) ? data.choices : []
+      for (const choice of choices) {
+        if (!isRecord(choice) || !isRecord(choice.delta)) continue
+        const delta = choice.delta
+        const textDelta = stringValue(delta.content) || ''
+        if (textDelta) {
+          content += textDelta
+          onDelta?.(textDelta)
+        }
+
+        const calls = Array.isArray(delta.tool_calls) ? delta.tool_calls : []
+        for (const call of calls) {
+          if (!isRecord(call)) continue
+          const rawIndex = typeof call.index === 'number' ? call.index : Number(call.index)
+          const index = Number.isInteger(rawIndex)
+            ? rawIndex
+            : toolCalls.size > 0
+              ? toolCalls.size - 1
+              : 0
+          const current = toolCalls.get(index) || { name: '', argumentsText: '' }
+          const fn = isRecord(call.function) ? call.function : {}
+          toolCalls.set(index, {
+            id: stringValue(call.id) || current.id,
+            type: stringValue(call.type) || current.type || 'function',
+            name: stringValue(fn.name) || current.name,
+            argumentsText: current.argumentsText + (stringValue(fn.arguments) || '')
+          })
+        }
+      }
+    }
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const chunk = decoder.decode(value, { stream: true })
+    raw += chunk
+    buffer += chunk
+    const events = buffer.split(/\n\n/)
+    buffer = events.pop() || ''
+    events.forEach(processEvent)
+  }
+
+  if (buffer.trim()) processEvent(buffer)
+  if (!sawSseData) {
+    const message = parseBufferedChatCompletion(raw)
+    const fallbackContent = stringValue(message.content)
+    if (fallbackContent) onDelta?.(fallbackContent)
+    return message
+  }
+
+  const normalizedToolCalls = Array.from(toolCalls.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([, call]) => ({
+      id: call.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      type: call.type || 'function',
+      function: {
+        name: call.name,
+        arguments: call.argumentsText || '{}'
+      }
+    }))
+    .filter((call) => call.function.name)
+
+  return {
+    role: 'assistant',
+    content,
+    ...(normalizedToolCalls.length > 0 ? { tool_calls: normalizedToolCalls } : {})
+  }
+}
+
+function parseBufferedChatCompletion(raw: string): Record<string, unknown> {
+  try {
+    const data = JSON.parse(raw) as { choices?: Array<{ message?: Record<string, unknown> }> }
+    return data.choices?.[0]?.message || {}
+  } catch {
+    return {}
+  }
 }
 
 async function runOpenAiResponsesAgent(input: DocumentAgentInput): Promise<DocumentAgentOutput> {
@@ -205,18 +338,27 @@ async function runOpenAiResponsesAgent(input: DocumentAgentInput): Promise<Docum
 
   for (let turn = 0; turn < maxTurns; turn += 1) {
     ensureNotCancelled(input.signal)
-    input.onProgress?.(turn === 0 ? 'AI 正在结合文档 SKILL 理解请求...' : 'AI 正在根据工具结果继续处理...')
+    const guidanceInput = consumeOpenAiResponsesGuidance(input)
+    if (guidanceInput.length > 0) nextInput = mergeResponsesInput(nextInput, guidanceInput)
     const responseData = await callOpenAiResponsesTurn(input, nextInput, previousResponseId)
     previousResponseId = stringValue(responseData.id) || previousResponseId
     const toolCalls = extractOpenAiResponsesToolCalls(responseData)
     if (toolCalls.length === 0) {
+      const reply = extractResponseOutputText(responseData) || buildDefaultReply(actionResults)
+      const guidedInput = consumeOpenAiResponsesGuidance(input)
+      if (guidedInput.length > 0) {
+        input.onAssistantDelta?.(reply ? `${reply}\n` : '')
+        nextInput = guidedInput
+        continue
+      }
       if (shouldAskAiToRepairAfterToolFailure(actionResults)) {
         input.onProgress?.('文档工具上一步失败，AI 没有继续调用工具，正在要求它换方法重试...')
         nextInput = buildOpenAiResponsesRepairInput(actionResults)
         continue
       }
+      input.onAssistantDelta?.(reply)
       return {
-        reply: extractResponseOutputText(responseData) || buildDefaultReply(actionResults),
+        reply,
         actionResults: visibleActionResults(actionResults)
       }
     }
@@ -286,7 +428,7 @@ async function runAnthropicAgent(input: DocumentAgentInput): Promise<DocumentAge
 
   for (let turn = 0; turn < maxTurns; turn += 1) {
     ensureNotCancelled(input.signal)
-    input.onProgress?.(turn === 0 ? 'AI 正在结合文档 SKILL 理解请求...' : 'AI 正在根据工具结果继续处理...')
+    appendAnthropicGuidance(input, messages)
     const responseData = await callAnthropicTurn(input, messages)
     const content = Array.isArray(responseData.content) ? responseData.content : []
     const toolCalls = content
@@ -299,19 +441,25 @@ async function runAnthropicAgent(input: DocumentAgentInput): Promise<DocumentAge
       .filter((toolCall) => toolCall.name)
 
     if (toolCalls.length === 0) {
+      const reply = content
+          .filter((item): item is Record<string, unknown> => isRecord(item) && item.type === 'text')
+          .map((item) => stringValue(item.text))
+          .filter(Boolean)
+          .join('\n')
+          .trim() || buildDefaultReply(actionResults)
+      if (appendAnthropicGuidance(input, messages, content)) {
+        input.onAssistantDelta?.(reply ? `${reply}\n` : '')
+        continue
+      }
       if (shouldAskAiToRepairAfterToolFailure(actionResults)) {
         input.onProgress?.('文档工具上一步失败，AI 没有继续调用工具，正在要求它换方法重试...')
         messages.push({ role: 'assistant', content })
         messages.push({ role: 'user', content: buildToolFailureRepairPrompt(actionResults) })
         continue
       }
+      input.onAssistantDelta?.(reply)
       return {
-        reply: content
-          .filter((item): item is Record<string, unknown> => isRecord(item) && item.type === 'text')
-          .map((item) => stringValue(item.text))
-          .filter(Boolean)
-          .join('\n')
-          .trim() || buildDefaultReply(actionResults),
+        reply,
         actionResults: visibleActionResults(actionResults)
       }
     }
@@ -478,6 +626,90 @@ function buildSystemText(input: DocumentAgentInput): string {
   ]
     .filter(Boolean)
     .join('\n\n---\n\n')
+}
+
+function appendOpenAiChatGuidance(
+  input: DocumentAgentInput,
+  messages: Array<Record<string, unknown>>,
+  assistantContent?: string
+): boolean {
+  const guidance = consumeGuidanceMessages(input)
+  if (guidance.length === 0) return false
+  if (typeof assistantContent === 'string') {
+    messages.push({ role: 'assistant', content: assistantContent })
+  }
+  messages.push(...guidance.map(openAiChatGuidanceMessage))
+  return true
+}
+
+function consumeOpenAiResponsesGuidance(input: DocumentAgentInput): Array<Record<string, unknown>> {
+  return consumeGuidanceMessages(input).map(openAiResponsesGuidanceMessage)
+}
+
+function mergeResponsesInput(current: unknown, guidance: Array<Record<string, unknown>>): unknown {
+  if (guidance.length === 0) return current
+  if (Array.isArray(current)) return [...current, ...guidance]
+  return [current, ...guidance].filter(Boolean)
+}
+
+function appendAnthropicGuidance(
+  input: DocumentAgentInput,
+  messages: Array<Record<string, unknown>>,
+  assistantContent?: unknown
+): boolean {
+  const guidance = consumeGuidanceMessages(input)
+  if (guidance.length === 0) return false
+  if (typeof assistantContent !== 'undefined') {
+    messages.push({ role: 'assistant', content: assistantContent })
+  }
+  messages.push(...guidance.map(anthropicGuidanceMessage))
+  return true
+}
+
+function consumeGuidanceMessages(input: DocumentAgentInput): ChatMessage[] {
+  return (input.consumeGuidance?.() || [])
+    .filter((message) => message.role === 'user')
+    .map((message) => ({
+      ...message,
+      content: appendAttachmentContext(message.content, message.attachments),
+      attachments: message.attachments?.filter((attachment) =>
+        attachment.kind === 'image' || attachment.kind === 'file' || attachment.kind === 'audio'
+      )
+    }))
+}
+
+function openAiChatGuidanceMessage(message: ChatMessage): Record<string, unknown> {
+  return {
+    role: 'user',
+    content: message.attachments?.length
+      ? [
+          { type: 'text', text: message.content },
+          ...message.attachments.flatMap((attachment) => openAiChatAttachmentParts(attachment))
+        ]
+      : message.content
+  }
+}
+
+function openAiResponsesGuidanceMessage(message: ChatMessage): Record<string, unknown> {
+  return {
+    role: 'user',
+    content: [
+      { type: 'input_text', text: message.content },
+      ...(message.attachments || []).flatMap((attachment) => openAiResponsesAttachmentParts(attachment))
+    ]
+  }
+}
+
+function anthropicGuidanceMessage(message: ChatMessage): Record<string, unknown> {
+  return {
+    role: 'user',
+    content: message.attachments?.length
+      ? [
+          { type: 'text', text: message.content },
+          ...message.attachments.flatMap((attachment) => anthropicAttachmentParts(attachment))
+        ]
+      : message.content
+  }
 }
 
 function buildOpenAiChatMessages(input: DocumentAgentInput): Array<Record<string, unknown>> {

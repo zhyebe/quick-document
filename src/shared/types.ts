@@ -201,6 +201,11 @@ export interface ChatRequest {
   workspaceSnapshot?: WorkspaceSnapshot
 }
 
+export interface ChatGuidanceRequest {
+  requestId: string
+  message: ChatMessage
+}
+
 export interface ChatResponse {
   message: ChatMessage
   generatedFiles: GeneratedFile[]
@@ -213,8 +218,9 @@ export interface ChatHistorySnapshot {
 
 export interface ChatStreamEvent {
   requestId: string
-  type: 'status' | 'done' | 'error' | 'step-done'
+  type: 'assistant-delta' | 'status' | 'done' | 'error' | 'step-done'
   message?: string
+  delta?: string
 }
 
 export interface UpdateAsset {

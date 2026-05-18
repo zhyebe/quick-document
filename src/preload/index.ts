@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppSettings,
+  ChatGuidanceRequest,
   ChatRequest,
   ChatResponse,
   ChatHistorySnapshot,
@@ -27,6 +28,8 @@ const api = {
     ipcRenderer.invoke('workspace:scan', rootPath),
   sendMessage: (request: ChatRequest): Promise<ChatResponse> =>
     ipcRenderer.invoke('chat:send', request),
+  sendGuidance: (request: ChatGuidanceRequest): Promise<boolean> =>
+    ipcRenderer.invoke('chat:guide', request),
   cancelMessage: (requestId: string): Promise<boolean> =>
     ipcRenderer.invoke('chat:cancel', requestId),
   onChatStream: (callback: (event: ChatStreamEvent) => void): (() => void) => {
