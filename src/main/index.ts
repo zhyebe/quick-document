@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron'
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type {
@@ -42,9 +42,25 @@ if (!gotSingleInstanceLock) {
   })
 }
 
-const trayIcon = nativeImage.createFromDataURL(
+const fallbackTrayIcon = nativeImage.createFromDataURL(
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAQAAAC1+jfqAAAAKUlEQVR42mNgQANnz551YGRkZIABJgYGRgYGBiYGBpYGBgZGJgYGAAAKYgIrZbrZ2QAAAABJRU5ErkJggg=='
 )
+
+function getResourcePath(...segments: string[]): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'resources', ...segments)
+    : join(mainDir, '../../resources', ...segments)
+}
+
+function getAppIconPath(): string {
+  return getResourcePath('icons', process.platform === 'win32' ? 'icon.ico' : 'icon.png')
+}
+
+function createAppIcon(): Electron.NativeImage {
+  const iconPath = getAppIconPath()
+  const icon = existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : fallbackTrayIcon
+  return icon.isEmpty() ? fallbackTrayIcon : icon
+}
 
 function logMain(message: string, error?: unknown): void {
   try {
@@ -72,6 +88,7 @@ function createWindow(): BrowserWindow {
     minWidth: 940,
     minHeight: 620,
     title: 'Quick Document',
+    icon: createAppIcon(),
     show: true,
     backgroundColor: '#f7f7f5',
     webPreferences: {
@@ -154,6 +171,7 @@ function wirePermissionHandlers(window: BrowserWindow): void {
 
 function createTray(): void {
   if (tray) return
+  const trayIcon = createAppIcon()
   trayIcon.setTemplateImage(process.platform === 'darwin')
   tray = new Tray(trayIcon)
   tray.setToolTip('Quick Document')

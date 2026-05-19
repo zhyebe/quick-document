@@ -1,6 +1,6 @@
 {
   "name": "quick-document",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Cross-platform AI desktop assistant for Word, Excel, and PowerPoint documents.",
   "main": "out/main/index.js",
   "type": "module",
@@ -38,6 +38,7 @@
   "build": {
     "appId": "com.quickdocument.desktop",
     "productName": "Quick Document",
+    "icon": "resources/icons/icon",
     "directories": {
       "output": "release"
     },
@@ -52,6 +53,7 @@
       }
     ],
     "mac": {
+      "icon": "resources/icons/icon.icns",
       "category": "public.app-category.productivity",
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Quick Document 使用麦克风把语音输入转成文字并填入输入框。"
@@ -62,6 +64,7 @@
       ]
     },
     "win": {
+      "icon": "resources/icons/icon.ico",
       "target": [
         "nsis"
       ]

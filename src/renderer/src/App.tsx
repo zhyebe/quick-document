@@ -17,7 +17,6 @@ import {
   RefreshCw,
   Send,
   Settings,
-  Sparkles,
   Square,
   X
 } from 'lucide-react'
@@ -61,6 +60,7 @@ const welcomeMessage: ChatMessage = {
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 80
 const SCROLLBAR_HIT_WIDTH = 18
+const brandMarkUrl = new URL('./assets/quick-document-logo.png', import.meta.url).href
 
 function isNearBottom(element: HTMLElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= AUTO_SCROLL_BOTTOM_THRESHOLD
@@ -736,7 +736,7 @@ export function App(): JSX.Element {
         <div className="sidebar-main">
           <div className="brand-block">
             <div className="brand-mark">
-              <Sparkles size={18} />
+              <img src={brandMarkUrl} alt="" aria-hidden="true" />
             </div>
             <div>
               <strong>Quick Document</strong>
